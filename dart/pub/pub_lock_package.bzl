@@ -96,6 +96,11 @@ def _pub_lock_package_impl(ctx):
 
     ctx.file("BUILD.bazel", build_content)
 
+    # Pinned by sha256, the package's contents depend only on the attrs, so
+    # Bazel may share them across workspaces (the repo contents cache).
+    # Unpinned, a re-fetch could differ, so it stays per workspace.
+    return ctx.repo_metadata(reproducible = bool(ctx.attr.sha256))
+
 pub_lock_package = repository_rule(
     implementation = _pub_lock_package_impl,
     attrs = {

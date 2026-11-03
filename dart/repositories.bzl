@@ -93,6 +93,11 @@ dart_toolchain(
 
     repository_ctx.file("BUILD.bazel", build_content)
 
+    # The SDK is pinned by sha256, so its contents depend only on the attrs:
+    # Bazel may share one extraction across every workspace on the machine
+    # (the repo contents cache) instead of unzipping it per output base.
+    return repository_ctx.repo_metadata(reproducible = True)
+
 dart_repositories = repository_rule(
     _dart_sdk_repo_impl,
     doc = _DOC,
