@@ -34,9 +34,8 @@ file at runtime — keep file lists current as the repo evolves.
 - `e2e/fix/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `README.md` — `dart.toolchain(dart_version = "...")` in installation snippet
 - `dart/tests/versions_test.bzl` — asserted version key in `_smoke_test_impl`
-- `dart/runfiles/pubspec.yaml` — `environment.sdk` constraint (published to
-  pub.dev; keep the lower bound as low as stays compatible rather than tracking
-  the newest SDK)
+- `dart/runfiles/pubspec.yaml` — `environment.sdk` constraint (keep the lower
+  bound as low as stays compatible rather than tracking the newest SDK)
 
 **Procedure**:
 
@@ -427,8 +426,7 @@ buildifier and commitizen revs silently drifted as a result.
 
 **Dependencies** (all `uses:` references across workflows):
 
-- Actions: `actions/checkout`, `amannn/action-semantic-pull-request`,
-  `dart-lang/setup-dart`, `smlx/ccv`, `j178/prek-action`
+- Actions: `actions/checkout`, `bazel-contrib/setup-bazel`, `j178/prek-action`
 - Reusable workflows: `bazel-contrib/.github` (CI)
 
 **Procedure**:
