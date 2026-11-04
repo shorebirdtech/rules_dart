@@ -1,7 +1,7 @@
 """Unit tests for dart_library.bzl helpers."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
-load("//dart/private:dart_library.bzl", "check_files_under_lib_root", "check_no_duplicate_srcs")
+load("//dart/private:dart_library.bzl", "check_files_under_lib_root", "check_no_duplicate_srcs", "library_lib_root")
 
 def _stray_src_rejected_test_impl(ctx):
     # The helper is unit-tested below; this asserts `dart_library` actually
@@ -133,6 +133,25 @@ def _lib_root_rejects_foreign_codegen_output_test_impl(ctx):
     asserts.true(env, "codegen" in err, "should hint at the codegen case: %s" % err)
     return unittest.end(env)
 
+def _declared_root_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    # No declaration, or one that doesn't sit above: the BUILD directory.
+    asserts.equals(env, "pkg", library_lib_root("pkg", None))
+    asserts.equals(env, "app", library_lib_root("app", "gen"))
+
+    # Under the declaration's lib/: one directory of the declared package.
+    asserts.equals(env, "pkg", library_lib_root("pkg/lib/src/model", "pkg"))
+    asserts.equals(env, "", library_lib_root("lib/src/model", ""))
+    asserts.equals(env, "pkg", library_lib_root("pkg", "pkg"))
+
+    # Below the declaration but outside its lib/ (a nested package, a test
+    # dir): its own root, as before.
+    asserts.equals(env, "pkg/packages/sub", library_lib_root("pkg/packages/sub", "pkg"))
+    asserts.equals(env, "pkg/library", library_lib_root("pkg/library", "pkg"))
+    return unittest.end(env)
+
+_declared_root_test = unittest.make(_declared_root_test_impl)
 _clean_srcs_test = unittest.make(_clean_srcs_no_error_test_impl)
 _lib_root_ok_test = unittest.make(_lib_root_accepts_lib_sources_test_impl)
 _lib_root_root_pkg_test = unittest.make(_lib_root_accepts_root_package_test_impl)
@@ -155,6 +174,7 @@ def library_test_suite(name):
     _identical_file_test(name = "library_identical_file_test", size = "small")
     _collision_test(name = "library_collision_test", size = "small")
     _lib_root_ok_test(name = "library_lib_root_ok_test", size = "small")
+    _declared_root_test(name = "library_declared_root_test", size = "small")
     _lib_root_root_pkg_test(name = "library_lib_root_root_pkg_test", size = "small")
     _lib_root_external_test(name = "library_lib_root_external_test", size = "small")
     _lib_root_outside_test(name = "library_lib_root_outside_test", size = "small")
@@ -166,6 +186,7 @@ def library_test_suite(name):
             ":library_identical_file_test",
             ":library_collision_test",
             ":library_lib_root_ok_test",
+            ":library_declared_root_test",
             ":library_lib_root_root_pkg_test",
             ":library_lib_root_external_test",
             ":library_lib_root_outside_test",

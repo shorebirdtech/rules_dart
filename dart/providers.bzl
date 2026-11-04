@@ -64,6 +64,7 @@ trap `DartAnalyzableInfo` exists to avoid.""",
     fields = {
         "package_name": "str: The Dart package name used in `package:` imports. Required.",
         "language_version": "str: Dart language version implied by the package's `environment.sdk` constraint, in `<major>.<minor>` form. Empty when the package states none.",
+        "root": "str: The `short_path`-based directory of the declaring target's BUILD file (with a trailing `/lib` stripped). A `dart_library` whose BUILD file sits under `<root>/lib/` takes it as its package root.",
     },
 )
 

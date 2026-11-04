@@ -149,6 +149,30 @@ def derive_lib_root(workspace_root, label_package):
         lib_root = lib_root[:-4] if lib_root.endswith("/lib") else ""
     return lib_root
 
+def library_lib_root(own_root, declared_root):
+    """The package root of a `dart_library` from its directory and its declaration.
+
+    A library takes its own BUILD directory as its package root (less a
+    trailing `/lib`), unless its `package` declaration sits above it and the
+    library's directory lies under that declaration's `lib/`. Then the library
+    is one directory of a larger package, as Dart itself reads a file under
+    `<root>/lib/src/x/` as `package:<name>/src/x/...`, and the declaration's
+    directory is the root.
+
+    Args:
+        own_root: `derive_lib_root` of the library's own label.
+        declared_root: The `root` of its `dart_package_metadata`, or None.
+
+    Returns:
+        The library's package root, `short_path`-based.
+    """
+    if declared_root == None:
+        return own_root
+    lib_dir = declared_root + "/lib" if declared_root else "lib"
+    if own_root == declared_root or own_root.startswith(lib_dir + "/"):
+        return declared_root
+    return own_root
+
 def _dart_library_impl(ctx):
     identity = resolve_package_identity(ctx)
     package_name = derive_package_name(
@@ -206,7 +230,10 @@ def _dart_library_impl(ctx):
         if err != None:
             fail(err)
         own_srcs = ctx.files.srcs
-        lib_root = derive_lib_root(ctx.label.workspace_root, ctx.label.package)
+        lib_root = library_lib_root(
+            derive_lib_root(ctx.label.workspace_root, ctx.label.package),
+            identity.root,
+        )
         err = check_files_under_lib_root(ctx.label, lib_root, own_srcs)
         if err != None:
             fail(err)
