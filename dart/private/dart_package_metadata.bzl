@@ -1,11 +1,13 @@
 """The `dart_package_metadata` rule: a package's name and language version, declared once."""
 
 load("//dart:providers.bzl", "DartPackageMetadataInfo")
+load("//dart/private:dart_library.bzl", "derive_lib_root")
 
 def _dart_package_impl(ctx):
     return [DartPackageMetadataInfo(
         package_name = ctx.attr.package_name,
         language_version = ctx.attr.language_version,
+        root = derive_lib_root(ctx.label.workspace_root, ctx.label.package),
     )]
 
 dart_package_metadata = rule(
@@ -63,5 +65,20 @@ can be referenced from both.
 
 Not to be confused with `pub.package()`, the module extension tag that fetches a
 published package from pub.dev. This declares facts about a package you are
-building yourself.""",
+building yourself.
+
+It also places the package. Declared in the package's root BUILD file (beside
+`pubspec.yaml`), it lets the package's sources be split across BUILD files under
+`lib/`: a `dart_library` in `lib/src/model/BUILD.bazel` with `package =
+"//:pkg"` builds `package:my_app/src/model/...`, rather than a package rooted at
+its own directory. One target per directory is what Gazelle generates.
+
+```starlark
+# lib/src/model/BUILD.bazel
+dart_library(
+    name = "model",
+    package = "//:pkg",
+    srcs = glob(["*.dart"]),
+)
+```""",
 )

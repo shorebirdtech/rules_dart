@@ -1,0 +1,11 @@
+load("//dart:defs.bzl", "dart_library")
+
+# Imports its sibling both ways a package's own files do: by `package:` URI
+# and by relative path.
+dart_library(
+    name = "view",
+    srcs = ["view.dart"],
+    package = "//dart/tests/subdir_root_fixture:pkg",
+    visibility = ["//dart/tests/subdir_root_fixture:__subpackages__"],
+    deps = ["//dart/tests/subdir_root_fixture/lib/src/model"],
+)

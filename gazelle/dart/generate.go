@@ -141,7 +141,7 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 			macroRule := buildMacroRule(args, f, flatBuilders[0])
 			if macroRule != nil {
 				gen = append(gen, macroRule)
-				imports = append(imports, collectImports([]DartFileInfo{f}))
+				imports = append(imports, collectImports(args, []DartFileInfo{f}))
 				continue
 			}
 		}
@@ -158,7 +158,7 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 		}
 		libRule := buildAnnotatedLibrary(args, f, libSrcs)
 		gen = append(gen, libRule)
-		imports = append(imports, collectImports([]DartFileInfo{f}))
+		imports = append(imports, collectImports(args, []DartFileInfo{f}))
 	}
 
 	// Plain dart_library for unannotated lib/ sources (the common case).
@@ -168,7 +168,18 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 			plain = append(plain, f)
 		}
 	}
-	if len(plain) > 0 {
+	if p := placeLibrary(args.Config, args.Rel, args.Dir); len(plain) > 0 && p.Decl != nil {
+		// One directory of a package declared above: named for the
+		// directory, and placed in the package by its declaration.
+		r := rule.NewRule("dart_library", splitLibraryName(args.Rel, p))
+		srcs := fileNames(plain)
+		sort.Strings(srcs)
+		r.SetAttr("srcs", srcs)
+		r.SetAttr("package", declLabel(args.Rel, p.Decl))
+		r.SetAttr("visibility", []string{"//visibility:public"})
+		gen = append(gen, r)
+		imports = append(imports, collectImports(args, plain))
+	} else if len(plain) > 0 {
 		r := rule.NewRule("dart_library", libraryName(args.Rel, args.Dir, args.Config))
 		srcs := fileNames(plain)
 		sort.Strings(srcs)
@@ -187,7 +198,7 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 			r.SetAttr("package_name", r.Name())
 		}
 		gen = append(gen, r)
-		imports = append(imports, collectImports(plain))
+		imports = append(imports, collectImports(args, plain))
 	}
 
 	for _, f := range binFiles {
@@ -195,7 +206,7 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 		r := rule.NewRule("dart_binary", name)
 		r.SetAttr("main", f.Path)
 		gen = append(gen, r)
-		imports = append(imports, collectImports([]DartFileInfo{f}))
+		imports = append(imports, collectImports(args, []DartFileInfo{f}))
 	}
 
 	for _, f := range testFiles {
@@ -203,7 +214,7 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 		r := rule.NewRule("dart_test", name)
 		r.SetAttr("main", f.Path)
 		gen = append(gen, r)
-		imports = append(imports, collectImports([]DartFileInfo{f}))
+		imports = append(imports, collectImports(args, []DartFileInfo{f}))
 	}
 
 	return language.GenerateResult{
@@ -551,6 +562,12 @@ func setPackageIdentity(r *rule.Rule, args language.GenerateArgs, pkgName string
 		r.SetAttr("package", decl)
 		return
 	}
+	if p := placeLibrary(args.Config, args.Rel, args.Dir); p.Decl != nil {
+		// One directory of a package declared above: its root and name
+		// come from that declaration.
+		r.SetAttr("package", declLabel(args.Rel, p.Decl))
+		return
+	}
 	if pkgName != "" {
 		r.SetAttr("package_name", pkgName)
 	}
@@ -601,20 +618,54 @@ func fileNames(files []DartFileInfo) []string {
 	return names
 }
 
+// importSet is what a rule's files import: the packages they name, and the
+// `package:` URI of each imported file, relative imports included, so a dep
+// resolves to the target that holds the file rather than to whatever target
+// carries the package's name.
 type importSet struct {
 	packages map[string]bool
+	uris     map[string]map[string]bool // package name -> imported file URIs
+	self     string                     // the importing rule's own Dart package
+	split    bool                       // the rule is one directory of a package declared above
 }
 
-func collectImports(files []DartFileInfo) *importSet {
-	is := &importSet{packages: make(map[string]bool)}
+func collectImports(args language.GenerateArgs, files []DartFileInfo) *importSet {
+	p := placeLibrary(args.Config, args.Rel, args.Dir)
+	is := &importSet{
+		packages: make(map[string]bool),
+		uris:     make(map[string]map[string]bool),
+		self:     p.PackageName,
+		split:    p.Decl != nil,
+	}
 	for _, f := range files {
+		file := path.Join(args.Rel, f.Path)
 		for _, imp := range f.Imports {
-			if imp.IsPackage {
-				is.packages[imp.Package] = true
+			uri := importURI(p, file, imp)
+			if uri == "" {
+				if imp.IsPackage {
+					is.packages[imp.Package] = true
+				}
+				continue
 			}
+			pkg := strings.SplitN(strings.TrimPrefix(uri, "package:"), "/", 2)[0]
+			is.packages[pkg] = true
+			if is.uris[pkg] == nil {
+				is.uris[pkg] = make(map[string]bool)
+			}
+			is.uris[pkg][uri] = true
 		}
 	}
 	return is
+}
+
+// SortedURIs returns the file URIs imported from pkg, sorted.
+func (is *importSet) SortedURIs(pkg string) []string {
+	var uris []string
+	for u := range is.uris[pkg] {
+		uris = append(uris, u)
+	}
+	sort.Strings(uris)
+	return uris
 }
 
 func (is *importSet) SortedPackages() []string {

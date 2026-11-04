@@ -115,7 +115,15 @@ def _dart_codegen_impl(ctx):
         ctx.attr.deps,
         identity.package_name,
     )
-    lib_root = lib_root_from_deps if lib_root_from_deps != None else ctx.label.package
+
+    # Otherwise a `package` declaration's root (a rule in one directory of
+    # a package declared above it), else the rule's own directory.
+    if lib_root_from_deps != None:
+        lib_root = lib_root_from_deps
+    elif identity.root != None:
+        lib_root = identity.root
+    else:
+        lib_root = ctx.label.package
 
     # Auto-stage same-package sibling files discovered in `deps` so builders
     # (stacked, mockito, cross-file resolvers, …) see them via the Resolver /

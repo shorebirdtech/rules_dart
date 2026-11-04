@@ -263,7 +263,9 @@ def resolve_package_identity(ctx):
         `package_name` and/or `language_version`.
 
     Returns:
-      `struct(package_name, language_version)`, either of which may be "".
+      `struct(package_name, language_version, root)`; either of the first
+      two may be "", and `root` is None unless a `package` declaration
+      states it.
     """
     inline_name = getattr(ctx.attr, "package_name", "")
     inline_language_version = getattr(ctx.attr, "language_version", "")
@@ -273,6 +275,7 @@ def resolve_package_identity(ctx):
         return struct(
             package_name = inline_name,
             language_version = inline_language_version,
+            root = None,
         )
 
     also_set = []
@@ -295,6 +298,7 @@ def resolve_package_identity(ctx):
     return struct(
         package_name = declared.package_name,
         language_version = declared.language_version,
+        root = getattr(declared, "root", None),
     )
 
 def codegen_identity_error(label, srcs, identity):

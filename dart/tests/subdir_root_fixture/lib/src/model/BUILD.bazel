@@ -1,0 +1,8 @@
+load("//dart:defs.bzl", "dart_library")
+
+dart_library(
+    name = "model",
+    srcs = ["model.dart"],
+    package = "//dart/tests/subdir_root_fixture:pkg",
+    visibility = ["//dart/tests/subdir_root_fixture:__subpackages__"],
+)

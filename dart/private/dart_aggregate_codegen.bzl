@@ -79,7 +79,12 @@ def _dart_aggregate_codegen_impl(ctx):
         ctx.attr.deps,
         identity.package_name,
     )
-    lib_root = lib_root_from_deps if lib_root_from_deps != None else ctx.label.package
+    if lib_root_from_deps != None:
+        lib_root = lib_root_from_deps
+    elif identity.root != None:
+        lib_root = identity.root
+    else:
+        lib_root = ctx.label.package
 
     src_paths = [s.path for s in ctx.files.srcs]
     auto_staged, _ = same_package_library_dep_files(
