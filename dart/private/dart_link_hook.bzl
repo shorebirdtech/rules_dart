@@ -20,13 +20,16 @@ and lists both sets.
 load("//dart:providers.bzl", "DartDataAssetInfo", "DartInfo", "DartRecordedUsesInfo")
 load(
     "//dart/private:common.bzl",
+    "PATH_MAPPING",
+    "SDK_ENV",
     "collect_packages",
     "collect_transitive_resources",
     "collect_transitive_srcs",
+    "format_literal",
     "generate_package_config",
     "package_link_hook",
-    "writable_home_env",
 )
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
 
 def parse_data_asset_ids(label, ids):
     """Splits declared data asset ids into package and name.
@@ -105,22 +108,22 @@ def link_hook_runner_attr():
         "_link_hook_runner": attr.label(
             default = "//dart/private/tools:link_hook_runner",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
         ),
     }
 
-def dart_link_hook_actions(ctx, runner, sdk, recorded_uses, deps, data_asset_ids, name):
+def dart_link_hook_actions(ctx, runner, recorded_uses, deps, data_asset_ids, name):
     """Registers the link-hook actions for a closure; what `dart_link_hook` runs.
 
     For a rule that compiles its own kernel and so cannot depend on a
-    `dart_link_hook` target without a cycle. The caller's rule needs the
-    `//dart:exec_tools_toolchain_type` toolchain and `link_hook_runner_attr()`
-    in its `attrs`; `ctx` is used only for `ctx.actions` and `ctx.label`.
+    `dart_link_hook` target without a cycle. A hook reads uses and writes
+    data files, the same whichever host runs it, so the hooks run in
+    `PORTABLE`: the caller's rule declares `PORTABLE_EXEC_GROUPS` and merges
+    `link_hook_runner_attr()` into its `attrs`.
 
     Args:
       ctx: The rule context.
       runner: The link-hook runner executable (`ctx.executable._link_hook_runner`).
-      sdk: The exec toolchain's `dart_sdk_info`.
       recorded_uses: The recorded-uses JSON File.
       deps: Targets providing `DartInfo`; their closure is linked.
       data_asset_ids: The declared ids, each `package:<package>/<name>`.
@@ -132,6 +135,7 @@ def dart_link_hook_actions(ctx, runner, sdk, recorded_uses, deps, data_asset_ids
       put in an `_validation` output group, so every hook runs whenever the
       target builds even if it emits no asset).
     """
+    sdk = portable_sdk(ctx)
     declared, err = parse_data_asset_ids(ctx.label, data_asset_ids)
     if err != None:
         fail(err)
@@ -168,7 +172,7 @@ def dart_link_hook_actions(ctx, runner, sdk, recorded_uses, deps, data_asset_ids
         args.add("--dart", sdk.dart)
         args.add("--packages", package_config)
         args.add("--package-name", package_name)
-        args.add("--package-root", link_hook_package_root(hook))
+        args.add_all([hook], before_each = "--package-root", map_each = link_hook_package_root)
         args.add("--hook", hook)
         args.add("--recorded-uses", recorded_uses)
         args.add("--output", link_output)
@@ -180,7 +184,7 @@ def dart_link_hook_actions(ctx, runner, sdk, recorded_uses, deps, data_asset_ids
                 "%s/%s/%s" % (name, package_name, asset.name),
             )
             outputs.append(out)
-            args.add("--data-asset", "%s=%s" % (asset.name, out.path))
+            args.add("--data-asset", out, format = format_literal(asset.name) + "=%s")
             asset_infos.append(struct(
                 package = asset.package,
                 name = asset.name,
@@ -196,8 +200,10 @@ def dart_link_hook_actions(ctx, runner, sdk, recorded_uses, deps, data_asset_ids
             ),
             outputs = outputs,
             mnemonic = "DartLinkHook",
+            exec_group = PORTABLE,
             progress_message = "Running link hook of %s for %s" % (package_name, ctx.label),
-            env = writable_home_env(sdk.dart, link_output),
+            env = SDK_ENV,
+            execution_requirements = PATH_MAPPING,
         )
     return struct(assets = asset_infos, validation_outputs = link_outputs)
 
@@ -205,7 +211,6 @@ def _dart_link_hook_impl(ctx):
     result = dart_link_hook_actions(
         ctx,
         runner = ctx.executable._link_hook_runner,
-        sdk = ctx.toolchains["//dart:exec_tools_toolchain_type"].dart_sdk_info,
         recorded_uses = _recorded_uses(ctx),
         deps = ctx.attr.deps,
         data_asset_ids = ctx.attr.data_assets,
@@ -247,6 +252,6 @@ fails if a hook emits an asset not listed, or does not emit one that is. Each la
         ),
     } | link_hook_runner_attr(),
     provides = [DartDataAssetInfo],
-    toolchains = ["//dart:exec_tools_toolchain_type"],
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs the `hook/link.dart` of each package in `deps` over an executable's recorded uses and collects the data assets they emit.",
 )

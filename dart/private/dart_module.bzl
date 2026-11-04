@@ -40,7 +40,7 @@ Flutter SDK and gets its own modules, and everything else here is shared.
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//dart:providers.bzl", "DartInfo", "DartKernelSdkInfo", "DartModuleInfo")
 load("//dart/private:build_settings.bzl", "vm_define_comma_error")
-load("//dart/private:common.bzl", "KERNEL_FILESYSTEM_SCHEME", "own_package_record")
+load("//dart/private:common.bzl", "KERNEL_FILESYSTEM_SCHEME", "PATH_MAPPING", "add_kernel_roots", "collect_transitive_srcs", "dart_kernel_action", "kernel_root_path", "own_package_record")
 load(
     "//dart/private:dart_deps.bzl",
     "direct_dart_deps",
@@ -50,44 +50,15 @@ load(
     "propagated_toolchains",
     "reached_targets",
 )
+load("//dart/private:exec_groups.bzl", "EXEC_TOOLS_TOOLCHAIN", "PORTABLE", "PORTABLE_EXEC_GROUPS")
 
 _KERNEL_TOOL = Label("//dart/private/tools:kernel_tool")
 
-def kernel_root_path(short_path):
-    """A `short_path` as a path under the kernel filesystem roots.
-
-    A file of another repository has a `short_path` of `../<repo>/…` but sits
-    at `external/<repo>/…` under the exec root and the output directories.
-
-    Args:
-      short_path: A `File.short_path`, or a `lib_root`.
-
-    Returns:
-      The root-relative path.
-    """
-    return "external/" + short_path[3:] if short_path.startswith("../") else short_path
-
-def kernel_roots(files):
-    """The kernel filesystem roots `files` are found under, output directories first.
-
-    The exec root, plus the output directory of each generated file; a file's
-    root is what is left of its path once its `short_path` is taken off. The
-    output directories come first so a generated file wins over a stale copy
-    at the same path in the source tree: a sandbox hides the stale one, but a
-    persistent worker runs in the exec root, where it is visible.
-
-    Args:
-      files: Files a compile reads from source.
-
-    Returns:
-      A list of exec-root-relative directories, `.` last.
-    """
-    roots = {}
-    for f in files:
-        rel = kernel_root_path(f.short_path)
-        if f.path != rel and f.path.endswith("/" + rel):
-            roots[f.path[:-len(rel) - 1]] = None
-    return list(roots) + ["."]
+# Built for the host of the `portable` actions that run it; a rule merging this
+# into its `attrs` declares `PORTABLE_EXEC_GROUPS`.
+KERNEL_TOOL_ATTR = {
+    "_kernel_tool": attr.label(default = _KERNEL_TOOL, executable = True, cfg = config.exec(PORTABLE)),
+}
 
 def kernel_package_config(packages):
     """`package_config.json` content addressing each package through the kernel roots.
@@ -112,12 +83,52 @@ def kernel_package_config(packages):
         ))
     return '{\n  "configVersion": 2,\n  "packages": [\n%s\n  ]\n}\n' % ",\n".join(entries)
 
+def whole_program_kernel(ctx, main, packages, output_dill, product, defines = [], flags = [], native_assets_yaml = None):
+    """Compiles an executable's whole program from source into one kernel.
+
+    The program is the rule's `main`, its own `srcs`, and every source its
+    `deps` reach. Each is read where it stands: the front end searches the exec
+    root and each output directory (`dart_kernel_action`), so generated and
+    checked-in files of one directory resolve together.
+
+    Args:
+      ctx: The rule context; the rule has `main`, `srcs` and `deps`.
+      main: The entrypoint File: `ctx.file.main`, or one generated around it.
+      packages: The `DartPackageInfo` records the program compiles against.
+      output_dill: The `.dill` File to produce.
+      product: See `dart_kernel_action`.
+      defines: See `dart_kernel_action`.
+      flags: See `dart_kernel_action`.
+      native_assets_yaml: See `dart_kernel_action`.
+    """
+    package_config = ctx.actions.declare_file(ctx.label.name + ".package_config.json")
+    ctx.actions.write(package_config, kernel_package_config(packages))
+    dart_kernel_action(
+        ctx = ctx,
+        main = main,
+        transitive_srcs = depset([ctx.file.main] + ctx.files.srcs, transitive = [collect_transitive_srcs(ctx.attr.deps)]),
+        package_config = package_config,
+        output_dill = output_dill,
+        product = product,
+        defines = defines,
+        flags = flags,
+        native_assets_yaml = native_assets_yaml,
+    )
+
 def _info_path(module):
     return module.path + ".json"
 
 def _add_deps(args, modules):
     args.add_all(modules, before_each = "--dep-modules", expand_directories = False)
     args.add_all(modules, before_each = "--dep-manifest", map_each = _info_path, expand_directories = False)
+
+def _dirname(f):
+    return f.dirname
+
+def _snapshot_args(ctx, snapshot):
+    args = ctx.actions.args()
+    args.add("--snapshot", snapshot)
+    return args
 
 def _new_args(ctx):
     args = ctx.actions.args()
@@ -237,16 +248,16 @@ def _compile_modules(ctx, sdk, kernel_tool, name, srcs, packages, own_package, m
     if own_package != None:
         args.add("--package-name", own_package.package_name)
         args.add("--lib-root", own_package.lib_root)
-    args.add_all(kernel_roots(srcs), before_each = "--multi-root")
+    add_kernel_roots(args, "--multi-root", srcs)
     args.add_all(srcs, before_each = "--src", expand_directories = False)
     _add_deps(args, modules.modules)
     args.add_all(sdk.defines + defines, before_each = "--define")
-    args.add("--output-dir", out.path)
+    args.add_all([out], before_each = "--output-dir", expand_directories = False)
     args.add("--manifest-output", manifest)
 
     ctx.actions.run(
         executable = kernel_tool,
-        arguments = ["module", "--snapshot", sdk.kernel_worker.path, args],
+        arguments = ["module", _snapshot_args(ctx, sdk.kernel_worker), args],
         inputs = depset(
             srcs + [package_config, sdk.libraries_spec, sdk.platform, sdk.kernel_worker, sdk.runtime],
             transitive = [modules.modules, modules.manifests, sdk.tool_files],
@@ -256,11 +267,12 @@ def _compile_modules(ctx, sdk, kernel_tool, name, srcs, packages, own_package, m
         tools = [sdk.kernel_worker, sdk.runtime],
         outputs = [out, manifest],
         mnemonic = "DartModule",
+        exec_group = PORTABLE,
         progress_message = "Compiling Dart modules %{label}",
         # `kernel_tool` keeps one `kernel_worker` running across targets, which
         # reads each dependency's kernel once instead of once per target. The
         # last argument is the params file Bazel requires of a worker.
-        execution_requirements = {
+        execution_requirements = PATH_MAPPING | {
             "supports-workers": "1",
             "requires-worker-protocol": "proto",
         },
@@ -275,7 +287,7 @@ def _add_sdk_args(args, sdk):
     args.add("--platform", sdk.platform)
     args.add("--target", sdk.target)
 
-def dart_module_aspect(kernel_sdk, extra_dart_defines = Label("//dart:extra_dart_defines")):
+def dart_module_aspect(kernel_sdk, extra_dart_defines = Label("//dart:extra_dart_defines"), exec_toolchains = []):
     """Makes the aspect that compiles every `DartInfo` target to a kernel module.
 
     Call it at the top level of a `.bzl` file and assign the result, once per
@@ -284,11 +296,16 @@ def dart_module_aspect(kernel_sdk, extra_dart_defines = Label("//dart:extra_dart
     entrypoint against `DartModuleInfo.modules`, and link with
     `dart_link_kernel_action`.
 
+    The modules compile in `PORTABLE`, and `kernel_sdk` is built for the host
+    that group resolves to.
+
     Args:
       kernel_sdk: Label of a target providing `DartKernelSdkInfo`.
       extra_dart_defines: The command-line defines flag the executables read,
         so a dependency's module folds the same declarations as the
         entrypoint compiled against it.
+      exec_toolchains: Toolchain types `kernel_sdk` resolves besides the Dart
+        SDK, so the modules compile only on a host that has them.
 
     Returns:
       The aspect.
@@ -297,14 +314,20 @@ def dart_module_aspect(kernel_sdk, extra_dart_defines = Label("//dart:extra_dart
         implementation = _module_aspect_impl,
         attr_aspects = propagated_attrs,
         toolchains_aspects = propagated_toolchains,
-        attrs = {
-            "_kernel_sdk": attr.label(default = kernel_sdk, providers = [DartKernelSdkInfo]),
-            "_kernel_tool": attr.label(default = _KERNEL_TOOL, executable = True, cfg = "exec"),
+        exec_groups = {
+            PORTABLE: exec_group(toolchains = [EXEC_TOOLS_TOOLCHAIN] + exec_toolchains),
+        } if exec_toolchains else PORTABLE_EXEC_GROUPS,
+        attrs = KERNEL_TOOL_ATTR | {
+            "_kernel_sdk": _kernel_sdk_attr(kernel_sdk),
             "_extra_dart_defines": attr.label(default = extra_dart_defines),
             "_module_defines": attr.label(default = Label("//dart/private:module_defines")),
             "_modular_kernel": attr.label(default = Label("//dart:modular_kernel")),
         },
     )
+
+def _kernel_sdk_attr(kernel_sdk):
+    # Built for the host the modules compile on: the front end runs there.
+    return attr.label(default = kernel_sdk, providers = [DartKernelSdkInfo], cfg = config.exec(PORTABLE))
 
 vm_module_aspect = dart_module_aspect(Label("//dart/private:vm_kernel_sdk"))
 
@@ -324,13 +347,10 @@ module_defines_transition = transition(
 )
 
 # What an executable needs to compile its entrypoint and link: its `deps`,
-# through the module aspect and the defines transition, and the tools.
-KERNEL_TOOL_ATTR = {
-    "_kernel_tool": attr.label(default = _KERNEL_TOOL, executable = True, cfg = "exec"),
-}
-
+# through the module aspect and the defines transition, and the tools. The rule
+# declares `PORTABLE_EXEC_GROUPS`, where those compiles run.
 MODULE_EXECUTABLE_ATTRS = KERNEL_TOOL_ATTR | {
-    "_kernel_sdk": attr.label(default = Label("//dart/private:vm_kernel_sdk"), providers = [DartKernelSdkInfo]),
+    "_kernel_sdk": _kernel_sdk_attr(Label("//dart/private:vm_kernel_sdk")),
 }
 
 def collect_modules(deps):
@@ -407,9 +427,9 @@ def dart_entry_kernel_action(
     args = _new_args(ctx)
     args.add("--label", str(ctx.label))
     _add_sdk_args(args, sdk)
-    args.add("--sdk-root", sdk.sdk_root)
+    args.add_all([sdk.platform], before_each = "--sdk-root", map_each = _dirname)
     args.add("--package-config", package_config)
-    args.add_all(kernel_roots([main]), before_each = "--multi-root")
+    add_kernel_roots(args, "--multi-root", [main])
     _add_deps(args, own.modules)
     args.add_all(sdk.defines + defines, before_each = "--define")
     inputs = [main, package_config, sdk.platform, sdk.frontend_server, sdk.runtime]
@@ -422,11 +442,13 @@ def dart_entry_kernel_action(
 
     ctx.actions.run(
         executable = kernel_tool,
-        arguments = ["entry", "--snapshot", sdk.frontend_server.path, args],
+        arguments = ["entry", _snapshot_args(ctx, sdk.frontend_server), args],
         inputs = depset(inputs, transitive = [own.modules, own.manifests, sdk.tool_files]),
         outputs = [output, selection],
         mnemonic = "DartEntryKernel",
+        exec_group = PORTABLE,
         progress_message = "Compiling Dart entrypoint %{label}",
+        execution_requirements = PATH_MAPPING,
     )
     return struct(modules = own.modules, manifests = own.manifests, selection = selection)
 
@@ -457,7 +479,9 @@ def dart_link_kernel_action(ctx, kernel_tool, entry, linked, output):
         inputs = depset([entry, linked.selection], transitive = [linked.modules, linked.manifests]),
         outputs = [output],
         mnemonic = "DartLinkKernel",
+        exec_group = PORTABLE,
         progress_message = "Linking Dart kernel %{label}",
+        execution_requirements = PATH_MAPPING,
     )
 
 def _vm_kernel_sdk_impl(ctx):
@@ -486,7 +510,6 @@ def _vm_kernel_sdk_impl(ctx):
         kernel_worker = found["kernel_worker"],
         frontend_server = found["frontend_server"],
         platform = found["platform"],
-        sdk_root = found["platform"].dirname,
         libraries_spec = found["libraries_spec"],
         libraries_target = "vm",
         # What `dart compile kernel` folds in: a product runtime, no sanitizers.

@@ -54,6 +54,33 @@ http_archive(
 # without a warning. Dev-only: the C++ toolchain is the consuming module's call.
 bazel_dep(name = "apple_support", version = "2.10.1", dev_dependency = True)
 
+# A C++ toolchain for Linux arm64 execution platforms, so a C++ library built
+# for a Linux arm64 platform (a test run there, a code generator) compiles on a
+# Linux arm64 worker. hermetic-llvm's toolchain is one static binary with its own C
+# library, so the worker needs no headers or shared libraries. Only the
+# Linux-exec, Linux-target toolchain is registered: Mac builds keep the host's.
+bazel_dep(name = "llvm", version = "0.8.26", dev_dependency = True)
+
+llvm_tc = use_extension("@llvm//extensions:toolchain.bzl", "toolchain", dev_dependency = True)
+llvm_tc.exec(
+    arch = "aarch64",
+    os = "linux",
+)
+llvm_tc.target(
+    arch = "aarch64",
+    os = "linux",
+)
+use_repo(llvm_tc, "llvm_toolchains")
+
+register_toolchains(
+    "@llvm_toolchains//:all",
+    dev_dependency = True,
+)
+
+# hermetic-llvm supports cgo from Go 1.27.
+go_sdk = use_extension("@io_bazel_rules_go//go:extensions.bzl", "go_sdk", dev_dependency = True)
+go_sdk.download(version = "1.27.3")
+
 # Used by `dart_library`/`dart_source_set` to assemble generated + hand-written
 # sources into one directory (copy_to_directory). Regular (not dev) dep so
 # downstream modules get it; self-registers its copy toolchains.
@@ -66,7 +93,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "10.1.0", dev_dependency = Tru
 bazel_dep(name = "bazelrc-preset.bzl", version = "1.9.2", dev_dependency = True)
 
 dart = use_extension("//dart:extensions.bzl", "dart")
-dart.toolchain(dart_version = "3.13.5")
+dart.toolchain(dart_version = "3.13.7")
 use_repo(dart, "dart_toolchains")
 
 register_toolchains("@dart_toolchains//:all")

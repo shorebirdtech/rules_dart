@@ -11,7 +11,7 @@ file at runtime — keep file lists current as the repo evolves.
 
 **Files**:
 
-- `dart/private/versions.bzl` — add new version entry to `TOOL_VERSIONS`
+- `dart/private/versions.bzl` — add new version entry to `TOOL_VERSIONS` and to `CROSS_TOOL_VERSIONS`
 - `MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `e2e/hello_world/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `e2e/library_deps/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
@@ -32,6 +32,9 @@ file at runtime — keep file lists current as the repo evolves.
 - `e2e/dual_build/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `e2e/ext_exemplar/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `e2e/fix/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
+- `e2e/link_hook/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
+- `e2e/analyze_composition/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
+- `e2e/analyze_composition/dep_module/MODULE.bazel` — `dart.toolchain(dart_version = "...")`
 - `README.md` — `dart.toolchain(dart_version = "...")` in installation snippet
 - `dart/tests/versions_test.bzl` — asserted version key in `_smoke_test_impl`
 - `dart/runfiles/pubspec.yaml` — `environment.sdk` constraint (keep the lower
@@ -40,13 +43,22 @@ file at runtime — keep file lists current as the repo evolves.
 **Procedure**:
 
 1. Run `dart run tool/fetch_sdk_hashes.dart {version}` to get SHA-256 hashes
-2. Add the new version entry to `dart/private/versions.bzl`
+2. Add its two entries to `dart/private/versions.bzl`: the SDK checksums to
+   `TOOL_VERSIONS`, the cross-compilation binaries' to `CROSS_TOOL_VERSIONS`
 3. Update `dart_version` in all MODULE.bazel files listed above
 4. Update version references in `README.md`
 5. Update `dart/tests/versions_test.bzl` (asserted version key)
 6. Regenerate lock files: `dart run tool/refresh_locks.dart`
 7. Run `bazel test //dart/tests/...` to verify unit tests pass
 8. Pick one e2e workspace and run `bazel build //...` to smoke-test
+9. If the new SDK contains dart-lang/sdk e2c6325 (Mach-O `--strip` fix), retire
+   `dart/private/tools/compile_runner.dart`: pass `--strip` to gen_snapshot
+   (`--extra-gen-snapshot-options`) on macOS `exe` and `aot-snapshot`
+   compiles, delete the runner and `dart_bootstrap_binary`, and keep
+   `//dart/tests/reproducible_fixture` passing on macOS. Check that stripped
+   stack traces still say enough; if not, keep the debugging info with
+   `--save-debugging-info` beside the output. Then delete this step and step 11
+   of `.claude/commands/bump-dart-sdk.md`
 
 **Verification**: `bazel test //dart/tests/...` passes; at least one e2e workspace builds.
 
@@ -218,9 +230,13 @@ cannot, it is a cross-only target and costs no checksums.
   who bring their own cc toolchain
 - `docs/ARCHITECTURE.md` — platform list, toolchain counts, cross matrix
 
-Explicitly **not** needed: `versions.bzl` and `tool/fetch_sdk_hashes.dart`. A
-cross toolchain reuses the host SDK's `dart` binary, so no SDK is downloaded for
-the target and no checksum exists to fetch.
+- `tool/fetch_sdk_hashes.dart` — add it to the `crossTargets` values, mirroring
+  `CROSS_TARGETS`, then re-run it for every pinned version and replace each
+  `CROSS_TOOL_VERSIONS` entry in `dart/private/versions.bzl`
+
+Explicitly **not** needed: `TOOL_VERSIONS`. A cross toolchain reuses the host
+SDK's `dart` binary, so no SDK is downloaded for the target; only its
+`gen_snapshot` and `dartaotruntime` are.
 
 Before hard-coding the ELF table, confirm the real header bytes:
 
@@ -237,8 +253,9 @@ file /tmp/x /tmp/x.aot
 - `dart/private/toolchains_repo.bzl` — `PLATFORMS` rather than `TARGET_ONLY_PLATFORMS`
 - `dart/private/versions.bzl` — add the platform key to **every** version entry;
   `repositories.bzl` hard-errors on a missing key
-- `tool/fetch_sdk_hashes.dart` — add to the `platforms` list, then re-run it for
-  every pinned version
+- `tool/fetch_sdk_hashes.dart` — add to the `platforms` list (and to
+  `crossTargets` if it can cross-compile), then re-run it for every pinned
+  version
 
 **Verification**: `bazel test //dart/tests/...` — `toolchains_test.bzl` asserts
 the table invariants, including that every pinned version's checksum set matches

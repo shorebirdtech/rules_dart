@@ -9,9 +9,10 @@ The rules stage that layout hermetically from declared artifacts (see
 
 load("//dart:providers.bzl", "DartInfo")
 load("//dart/private:build_settings.bzl", "EXTRA_DART_DEFINES_ATTR", "merge_dart_defines")
-load("//dart/private:common.bzl", "collect_transitive_resources", "collect_transitive_srcs", "writable_home_env")
+load("//dart/private:common.bzl", "PATH_MAPPING", "SDK_ENV", "collect_transitive_resources", "collect_transitive_srcs", "format_literal")
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
 load("//dart/private:executable_package.bzl", "EXECUTABLE_PACKAGE_ATTRS", "executable_package")
-load("//dart/private:project_staging.bzl", "stage_dart_project")
+load("//dart/private:project_staging.bzl", "project_layout", "stage_dart_project")
 load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
 
 def _get_web_compilation_mode_flags(ctx, compile_mode):
@@ -50,8 +51,9 @@ def _dart_web_compile(ctx, compile_mode):
     Returns:
         A list of providers.
     """
-    toolchain = ctx.toolchains["//dart:toolchain_type"]
-    dart_sdk_info = toolchain.dart_sdk_info
+
+    # JavaScript and WebAssembly are the same whichever host compiles them.
+    dart_sdk_info = portable_sdk(ctx)
 
     own = executable_package(ctx, [ctx.file.main] + ctx.files.srcs)
     packages = own.packages
@@ -63,7 +65,7 @@ def _dart_web_compile(ctx, compile_mode):
     all_srcs = ([ctx.file.main] + list(ctx.files.srcs) +
                 collect_transitive_srcs(ctx.attr.deps).to_list() +
                 collect_transitive_resources(ctx.attr.deps).to_list())
-    staged = stage_dart_project(ctx, packages, all_srcs)
+    staged = stage_dart_project(ctx, project_layout(packages, all_srcs, [ctx.file.main] + ctx.files.srcs))
 
     # `dart compile wasm` writes more than the module: the `.mjs` loader that
     # instantiates it, the `.support.js` feature check a page runs first, and
@@ -91,9 +93,7 @@ def _dart_web_compile(ctx, compile_mode):
 
     # The entrypoint is compiled from inside the staged tree so the compiler's
     # walk-up finds the sibling .dart_tool/package_config.json.
-    args.add(staged.src_tree.path + "/" + ctx.file.main.short_path)
-
-    env = writable_home_env(dart_sdk_info.dart, output)
+    args.add_all([staged.src_tree], format_each = "%s/" + format_literal(ctx.file.main.short_path), expand_directories = False)
 
     ctx.actions.run(
         executable = dart_sdk_info.dart,
@@ -104,8 +104,10 @@ def _dart_web_compile(ctx, compile_mode):
         ),
         outputs = outputs,
         mnemonic = "DartCompileWeb",
+        exec_group = PORTABLE,
         progress_message = "Compiling Dart %s %s" % (compile_mode, ctx.label),
-        env = env,
+        env = SDK_ENV,
+        execution_requirements = PATH_MAPPING,
     )
 
     return [
@@ -149,14 +151,16 @@ _WEB_BINARY_ATTRS = {
 dart_js_binary = rule(
     implementation = _dart_js_binary_impl,
     attrs = _WEB_BINARY_ATTRS,
-    toolchains = ["//dart:toolchain_type"] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Compiles a Dart web application to JavaScript via `dart compile js`.",
 )
 
 dart_wasm_binary = rule(
     implementation = _dart_wasm_binary_impl,
     attrs = _WEB_BINARY_ATTRS,
-    toolchains = ["//dart:toolchain_type"] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Compiles a Dart web application to WebAssembly via `dart compile wasm`. Requires a browser with WasmGC support.\n\n" +
           "Outputs `<name>.wasm`, the `<name>.mjs` loader that instantiates it, `<name>.support.js`, and " +
           "`<name>.wasm.map` unless `dart_compile_flags` has `--no-source-maps`. Each file but the module is " +

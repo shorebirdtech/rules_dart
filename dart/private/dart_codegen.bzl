@@ -63,6 +63,7 @@ load(
     "//dart/private:common.bzl",
     "DEFAULT_ROOT_LANGUAGE_VERSION",
     "PACKAGE_IDENTITY_ATTRS",
+    "PATH_MAPPING",
     "add_shim_contract_args",
     "asset_path_for",
     "dart_lib_root_for_package",
@@ -70,6 +71,7 @@ load(
     "same_package_library_dep_files",
     "synth_package_config",
 )
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
 
 def compute_codegen_output_name(src_path, output_suffix):
     """Compute the output file path for a codegen source file.
@@ -91,9 +93,9 @@ def compute_codegen_output_name(src_path, output_suffix):
 
 def _dart_codegen_impl(ctx):
     identity = resolve_package_identity(ctx)
-    toolchain = ctx.toolchains["//dart:exec_tools_toolchain_type"]
-    dart = toolchain.dart_sdk_info.dart
-    sdk_files = toolchain.dart_sdk_info.tool_files
+    sdk = portable_sdk(ctx)
+    dart = sdk.dart
+    sdk_files = sdk.tool_files
 
     if ctx.file.generator and ctx.executable.generator_bin:
         fail("%s: only one of `generator` or `generator_bin` may be set." %
@@ -155,10 +157,10 @@ def _dart_codegen_impl(ctx):
         # Bazel expands it into `WorkRequest.arguments` on the transport.
         args.use_param_file("@%s", use_always = True)
         args.set_param_file_format("multiline")
-        args.add("--input", src.path)
+        args.add("--input", src)
         args.add("--input-asset", asset_path_for(src, lib_root))
         for output in outputs:
-            args.add("--output", output.path)
+            args.add("--output", output)
         direct_inputs.extend(add_shim_contract_args(
             args,
             ctx,
@@ -179,8 +181,9 @@ def _dart_codegen_impl(ctx):
             ),
             outputs = outputs,
             mnemonic = "DartCodegen",
+            exec_group = PORTABLE,
             progress_message = "DartCodegen %s" % ctx.label,
-            execution_requirements = {
+            execution_requirements = PATH_MAPPING | {
                 "supports-workers": "1",
                 "requires-worker-protocol": "proto",
                 # The worker key includes the shim binary path; using the
@@ -191,11 +194,11 @@ def _dart_codegen_impl(ctx):
         )
     else:
         # Run generator as a Dart script via the SDK's dart executable.
-        args.add(ctx.file.generator.path)
-        args.add("--input", src.path)
+        args.add(ctx.file.generator)
+        args.add("--input", src)
         args.add("--input-asset", asset_path_for(src, lib_root))
         for output in outputs:
-            args.add("--output", output.path)
+            args.add("--output", output)
         direct_inputs.extend(add_shim_contract_args(
             args,
             ctx,
@@ -217,7 +220,9 @@ def _dart_codegen_impl(ctx):
             ),
             outputs = outputs,
             mnemonic = "DartCodegen",
+            exec_group = PORTABLE,
             progress_message = "DartCodegen %s" % ctx.label,
+            execution_requirements = PATH_MAPPING,
         )
 
     return [
@@ -266,7 +271,7 @@ dart_codegen = rule(
                   "rules_dart shim CLI contract. Mutually exclusive with " +
                   "`generator`.",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
         ),
         "output_suffixes": attr.string_list(
             doc = "One or more suffixes appended to the input stem to " +
@@ -340,7 +345,7 @@ dart_codegen = rule(
             allow_files = True,
         ),
     } | PACKAGE_IDENTITY_ATTRS,
-    toolchains = ["//dart:exec_tools_toolchain_type"],
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs a per-file Dart code generator, producing one or more " +
           "sibling outputs per input.",
 )

@@ -51,18 +51,20 @@ products into the workspace, so a fix and the analysis it answers can never see
 different projects.
 """
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//dart:providers.bzl", "DartAnalysisOptionsInfo", "DartAnalyzableInfo", "DartInfo")
-load("//dart/private:common.bzl", "merge_package_records", "own_package_record", "writable_home_env")
-load("//dart/private:project_staging.bzl", "pubspec_stub", "stage_dart_project", "staged_pubspec_paths")
+load("//dart/private:common.bzl", "PATH_MAPPING", "SDK_ENV", "merge_package_records", "own_package_record")
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
+load("//dart/private:project_staging.bzl", "project_layout", "pubspec_stub", "stage_dart_project", "staged_pubspec_paths")
+load("//dart/private:resources.bzl", "analysis_resources")
 load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
 
 # Analysis and formatting run on the build machine and produce nothing for the
-# target, so the SDK is chosen by the execution platform alone — the type the
-# codegen rules use, for the same reason. With the target-platform type, a
+# target, so they run in `PORTABLE`, whose SDK is chosen by the execution
+# platform alone, as the codegen rules' is. With the target-platform type, a
 # target that transitions to a platform no Dart SDK is registered for (an
 # Android bundle, say) failed toolchain resolution before the aspect could even
 # see it was not Dart.
-_TOOLCHAIN = "//dart:exec_tools_toolchain_type"
 
 _OPTIONS_BASENAME = "analysis_options.yaml"
 
@@ -171,7 +173,7 @@ def _wrapper_options(excluded):
             lines.append('    - "%s"' % path)
     return "\n".join(lines) + "\n"
 
-def stage_config_project(ctx, config, packages, files, own, name, sdk_version):
+def stage_config_project(ctx, config, packages, files, own, name, sdk_version, relocatable = False):
     """Stages a project holding every options file `config` lists.
 
     The one place a project is laid out for options to be found in: the
@@ -193,12 +195,14 @@ def stage_config_project(ctx, config, packages, files, own, name, sdk_version):
       name: Prefix for the staged paths.
       sdk_version: The toolchain SDK's version, the staged SDK constraint of a
         package that states no `language_version`.
+      relocatable: Whether the project is read through runfiles (see
+        `stage_dart_project`).
 
     Returns:
       The `stage_dart_project` struct.
     """
     packages = merge_package_records(packages + config.packages)
-    staged_files = files + config.files + config.options_files
+    layout = project_layout(packages, files + config.files + config.options_files, own)
     own_paths = [f.short_path for f in own]
     own_set = {f.path: True for f in own}
 
@@ -212,16 +216,16 @@ def stage_config_project(ctx, config, packages, files, own, name, sdk_version):
         if [p for p in own_paths if _is_under(p, f.short_path.rpartition("/")[0])]
     }
     excluded = {}
-    for f in staged_files:
-        if f.short_path.startswith("../") or f.path in own_set or f.path in governing:
+    for f in layout.src_files:
+        if f.path in own_set or f.path in governing:
             continue
         excluded["src/" + f.short_path] = True
-    excluded = sorted(excluded.keys()) + staged_pubspec_paths(packages)
+    excluded = sorted(excluded.keys()) + staged_pubspec_paths(layout)
 
     return stage_dart_project(
         ctx,
-        packages,
-        staged_files,
+        layout,
+        relocatable = relocatable,
         extra_proj_files = {
             "pubspec.yaml": pubspec_stub(packages, sdk_version = sdk_version),
             _OPTIONS_BASENAME: _wrapper_options(excluded),
@@ -230,23 +234,37 @@ def stage_config_project(ctx, config, packages, files, own, name, sdk_version):
         sdk_version = sdk_version,
     )
 
+def _project_dir(src_tree):
+    return src_tree.dirname
+
+def _add_project(args, staged):
+    args.add_all([staged.src_tree], before_each = "--project", map_each = _project_dir, expand_directories = False)
+
+def _add_analyzer(ctx, args):
+    if not ctx.attr._analysis_shutdown_workaround[BuildSettingInfo].value:
+        args.add("--dart-cli")
+
 def _analyze(ctx, name, staged, sdk_inputs):
     """Declares the `dart analyze` action; returns the stamp it writes on success."""
-    dart_sdk_info = ctx.toolchains[_TOOLCHAIN].dart_sdk_info
+    dart_sdk_info = portable_sdk(ctx)
     stamp = ctx.actions.declare_file(name + ".analyzed")
     args = ctx.actions.args()
     args.add("--dart", dart_sdk_info.dart)
-    args.add("--project", staged.proj_path)
+    _add_project(args, staged)
     args.add("--stamp", stamp)
     args.add("--fatal-infos")
+    _add_analyzer(ctx, args)
     ctx.actions.run(
         executable = ctx.executable._analyze_tool,
         arguments = [args],
         inputs = depset(direct = staged.inputs, transitive = [sdk_inputs]),
         outputs = [stamp],
         mnemonic = "DartAnalyze",
+        exec_group = PORTABLE,
+        resource_set = analysis_resources,
         progress_message = "Analyzing Dart sources of %{label}",
-        env = writable_home_env(dart_sdk_info.dart, stamp),
+        env = SDK_ENV,
+        execution_requirements = PATH_MAPPING,
     )
     return stamp
 
@@ -296,7 +314,7 @@ def _format(ctx, name, staged, sdk_inputs, own_paths, language_version):
     project: the staged tree also holds dependencies and rulesets, none of
     which are this target's to format.
     """
-    dart_sdk_info = ctx.toolchains[_TOOLCHAIN].dart_sdk_info
+    dart_sdk_info = portable_sdk(ctx)
     manifest = ctx.actions.declare_file(name + ".format_manifest")
     ctx.actions.write(
         output = manifest,
@@ -305,7 +323,7 @@ def _format(ctx, name, staged, sdk_inputs, own_paths, language_version):
     stamp = ctx.actions.declare_file(name + ".formatted")
     args = ctx.actions.args()
     args.add("--dart", dart_sdk_info.dart)
-    args.add("--project", staged.proj_path)
+    _add_project(args, staged)
     args.add("--manifest", manifest)
     args.add("--stamp", stamp)
 
@@ -318,8 +336,10 @@ def _format(ctx, name, staged, sdk_inputs, own_paths, language_version):
         inputs = depset(direct = staged.inputs + [manifest], transitive = [sdk_inputs]),
         outputs = [stamp],
         mnemonic = "DartFormat",
+        exec_group = PORTABLE,
         progress_message = "Checking Dart formatting of %{label}",
-        env = writable_home_env(dart_sdk_info.dart, stamp),
+        env = SDK_ENV,
+        execution_requirements = PATH_MAPPING,
     )
     return stamp
 
@@ -364,10 +384,10 @@ def _dart_analyze_aspect_impl(target, ctx):
         info.transitive_srcs.to_list() + info.transitive_resources.to_list() + entry + own.values(),
         own.values(),
         name,
-        ctx.toolchains[_TOOLCHAIN].dart_sdk_info.version,
+        portable_sdk(ctx).version,
     )
 
-    dart_sdk_info = ctx.toolchains[_TOOLCHAIN].dart_sdk_info
+    dart_sdk_info = portable_sdk(ctx)
     sdk_inputs = depset(direct = [dart_sdk_info.dart], transitive = [dart_sdk_info.tool_files])
 
     tags = getattr(ctx.rule.attr, "tags", [])
@@ -402,19 +422,23 @@ def _dart_analyze_aspect_impl(target, ctx):
     scratch = ctx.actions.declare_directory(name + ".scratch")
     fix_args = ctx.actions.args()
     fix_args.add("--dart", dart_sdk_info.dart)
-    fix_args.add("--project", staged.proj_path)
-    fix_args.add("--scratch", scratch.path)
-    fix_args.add("--fixes", fixes.path)
+    _add_project(fix_args, staged)
+    fix_args.add_all([scratch], before_each = "--scratch", expand_directories = False)
+    fix_args.add_all([fixes], before_each = "--fixes", expand_directories = False)
     fix_args.add("--manifest", manifest)
     fix_args.add("--eligible", eligible)
+    _add_analyzer(ctx, fix_args)
     ctx.actions.run(
         executable = ctx.executable._fix_tool,
         arguments = [fix_args],
         inputs = depset(direct = staged.inputs + [eligible], transitive = [sdk_inputs]),
         outputs = [fixes, manifest, scratch],
         mnemonic = "DartFix",
+        exec_group = PORTABLE,
+        resource_set = analysis_resources,
         progress_message = "Computing Dart fixes for %{label}",
-        env = writable_home_env(dart_sdk_info.dart, manifest),
+        env = SDK_ENV,
+        execution_requirements = PATH_MAPPING,
     )
 
     return [
@@ -433,22 +457,26 @@ dart_analyze = aspect(
             default = "//dart:analysis_config",
             providers = [DartAnalysisConfigInfo],
         ),
+        "_analysis_shutdown_workaround": attr.label(
+            default = "//dart:analysis_shutdown_workaround",
+        ),
         "_analyze_tool": attr.label(
             default = "//dart/private/tools:analyze_runner",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
         ),
         "_fix_tool": attr.label(
             default = "//dart/private/tools:fix_runner",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
         ),
         "_format_tool": attr.label(
             default = "//dart/private/tools:format_runner",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
         ),
     },
-    toolchains = [_TOOLCHAIN] + COPY_TO_DIRECTORY_TOOLCHAINS,
+    toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs `dart analyze` and `dart format` on a Dart target's own files; see `@rules_dart//dart:analyze.bzl`.",
 )

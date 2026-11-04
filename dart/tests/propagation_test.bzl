@@ -16,12 +16,11 @@ _L = "//pkg:consumer"
 def _asset(asset_id, owner_path = "libfoo.so", link_mode = "dynamic_loading_bundle", system_uri = ""):
     """A DartCodeAssetInfo stand-in.
 
-    `dynamic_library` needs only an `owner`, since `resolve_code_assets`
-    compares producing targets rather than `File`s.
+    `dynamic_library` needs only the `owner` and `path` of a `File`.
     """
     library = None
     if link_mode == "dynamic_loading_bundle":
-        library = struct(owner = owner_path)
+        library = struct(owner = owner_path, path = owner_path)
     return DartCodeAssetInfo(
         asset_id = asset_id,
         link_mode = link_mode,
@@ -66,6 +65,32 @@ def _resolve_unions_distinct_test_impl(ctx):
     )
     asserts.equals(env, 2, len(result))
     asserts.equals(env, ["package:a/a.g.dart", "package:b/b.g.dart"], [r.asset_id for r in result])
+    return unittest.end(env)
+
+def _resolve_explicit_replaces_transitive_test_impl(ctx):
+    # An asset named in `code_assets` replaces a different one `deps` supply
+    # under its id, rather than conflicting with it.
+    env = unittest.begin(ctx)
+    result = resolve_code_assets(
+        _L,
+        [_asset("package:a/a.g.dart", "liba.so"), _asset("package:b/b.g.dart", "libb.so")],
+        [_asset("package:a/a.g.dart", "liba_manual.so")],
+    )
+    asserts.equals(env, ["package:b/b.g.dart", "package:a/a.g.dart"], [r.asset_id for r in result])
+    asserts.equals(env, "liba_manual.so", result[1].dynamic_library.owner)
+    return unittest.end(env)
+
+def _resolve_explicit_settles_conflicting_deps_test_impl(ctx):
+    # Two `deps` claiming one id with different libraries are a conflict only
+    # until the target names the library to use in `code_assets`.
+    env = unittest.begin(ctx)
+    result = resolve_code_assets(
+        _L,
+        [_asset("package:a/a.g.dart", "liba_one.so"), _asset("package:a/a.g.dart", "liba_two.so")],
+        [_asset("package:a/a.g.dart", "liba_two.so")],
+    )
+    asserts.equals(env, ["package:a/a.g.dart"], [r.asset_id for r in result])
+    asserts.equals(env, "liba_two.so", result[0].dynamic_library.owner)
     return unittest.end(env)
 
 def _resolve_keeps_non_bundle_modes_test_impl(ctx):
@@ -375,11 +400,16 @@ def _manifest_contains_test_impl(ctx):
     content = manifests[0].content
     for asset_id in ctx.attr.expected_asset_ids:
         asserts.true(env, ('"%s"' % asset_id) in content, "%s missing from manifest: %s" % (asset_id, content))
+    for library in ctx.attr.expected_libraries:
+        asserts.true(env, library in content, "%s missing from manifest: %s" % (library, content))
     return analysistest.end(env)
 
 manifest_contains_test = analysistest.make(
     _manifest_contains_test_impl,
-    attrs = {"expected_asset_ids": attr.string_list()},
+    attrs = {
+        "expected_asset_ids": attr.string_list(),
+        "expected_libraries": attr.string_list(),
+    },
 )
 
 def _ownership_violation_test_impl(ctx):
@@ -412,6 +442,34 @@ asset_conflict_test = analysistest.make(
     expect_failure = True,
 )
 
+def _opt_mode_transition_impl(_settings, _attr):
+    return {"//command_line_option:compilation_mode": "opt"}
+
+_opt_mode_transition = transition(
+    implementation = _opt_mode_transition_impl,
+    inputs = [],
+    outputs = ["//command_line_option:compilation_mode"],
+)
+
+def _opt_mode_impl(ctx):
+    return [ctx.attr.dep[0][DartInfo]]
+
+opt_mode = rule(
+    implementation = _opt_mode_impl,
+    attrs = {"dep": attr.label(providers = [DartInfo], cfg = _opt_mode_transition)},
+    doc = "Forwards a `dart_library`'s `DartInfo` built with `-c opt`.",
+)
+
+def _two_configurations_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(env, "built in two configurations")
+    return analysistest.end(env)
+
+two_configurations_test = analysistest.make(
+    _two_configurations_test_impl,
+    expect_failure = True,
+)
+
 _t0_test = unittest.make(_resolve_dedups_diamond_test_impl)
 _t1_test = unittest.make(_resolve_explicit_matching_transitive_test_impl)
 _t2_test = unittest.make(_resolve_unions_distinct_test_impl)
@@ -430,6 +488,8 @@ _t14_test = unittest.make(_agreement_ignores_distinct_packages_test_impl)
 _t15_test = unittest.make(_agreement_tolerates_records_without_the_field_test_impl)
 _t16_test = unittest.make(_agreement_reports_every_disagreeing_package_test_impl)
 _t17_test = unittest.make(_agreement_reports_both_fields_together_test_impl)
+_t18_test = unittest.make(_resolve_explicit_replaces_transitive_test_impl)
+_t19_test = unittest.make(_resolve_explicit_settles_conflicting_deps_test_impl)
 
 def propagation_test_suite(name):
     """Declares the code-asset propagation unit tests.
@@ -457,4 +517,6 @@ def propagation_test_suite(name):
         _t15_test,
         _t16_test,
         _t17_test,
+        _t18_test,
+        _t19_test,
     )

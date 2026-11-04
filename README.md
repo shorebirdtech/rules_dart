@@ -10,7 +10,7 @@ Add to your `MODULE.bazel`:
 bazel_dep(name = "rules_dart", version = "0.1.0")
 
 dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
-dart.toolchain(dart_version = "3.13.5")
+dart.toolchain(dart_version = "3.13.7")
 use_repo(dart, "dart_toolchains")
 
 register_toolchains("@dart_toolchains//:all")
@@ -71,6 +71,12 @@ own runner, built from that same package, so Bazel's test features work:
 not reached only through a helper library: the runner comes with that target.
 A test whose `main` does not use `package:test` runs directly, and fails if
 given a filter or shards, because it has no cases to select.
+
+Like any Bazel test, a `dart_test` is built for the target platform, native
+`code_assets` and the Dart VM included, and runs on a host matching it. To run
+tests on another host, a remote Linux executor say, build them for that host's
+platform: with `--platforms`, or per test with a platform transition such as
+`platform_transition_test` from `aspect_bazel_lib`.
 
 ### Using pub.dev packages
 
@@ -477,6 +483,11 @@ bazel build //:fix --output_groups=+dart_fix_manifest  # what was fixed, and wha
 bazel build //:fix --output_groups=+dart_fix_fixes     # the fixed files themselves
 ```
 
+On macOS, I've seen dart analysis and dart fix hang after the analysis
+finished, because the Dart analysis server never shut down. If you hit this,
+please contact me or [open an issue](https://github.com/aran/rules_dart/issues),
+and try `--@rules_dart//dart:analysis_shutdown_workaround=true`.
+
 #### Checking targets `//...` does not reach
 
 The `.bazelrc` setup checks the targets a test run names, so it never reaches a
@@ -590,8 +601,6 @@ The [`e2e/`](e2e/) directory contains complete working examples:
 
 > **Note**: Only the `exe` and `aot-snapshot` compile modes cross-compile via
 > `--platforms`. `kernel` and `jit-snapshot` are VM formats that ignore target
-> flags, and `dart_test` always runs on the host. Linux targets are `linux-x64`,
-> `linux-arm64`, `linux-riscv64` and `linux-arm` (armv7, selected by
-> `@platforms//cpu:armv7`), reachable from every supported host. Cross-compiling
-> fetches SDK artifacts at action time, so it needs network access. See
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+> flags. Linux targets are `linux-x64`, `linux-arm64`, `linux-riscv64` and
+> `linux-arm` (armv7, selected by `@platforms//cpu:armv7`), reachable from every
+> supported host. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.

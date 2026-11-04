@@ -7,10 +7,10 @@ package whose files are split between the source tree and `bazel-out` (because a
 directory before `dart compile`/`dart` will resolve it.
 
 `assemble_source_dir` does that with bazel-lib's `copy_to_directory` (portable on
-Windows, no bash, no symlink privilege). The consuming `dart_binary`/`dart_test`
-assemble each package's complete file set at build time via `colocate_packages`
-and `colocate_entrypoint` — the consumer is the only place that sees a package's
-files across all of its `dart_library` fragments. `dart_source_set` exposes the
+Windows, no bash, no symlink privilege). A consumer that needs one directory
+per package assembles each package's complete file set at build time via
+`colocate_packages` — the consumer is the only place that sees a package's files
+across all of its `dart_library` fragments. `dart_source_set` exposes the
 same assembly as a standalone, package-agnostic primitive (consumed via
 `dart_library`'s `srcs_dir`).
 """
@@ -73,7 +73,20 @@ def assemble_source_dir(ctx, name, srcs, root_paths = ["."], replace_prefixes = 
     return dst
 
 def package_for(short_path, packages):
-    """Returns the package_name owning `short_path`, by longest matching `lib_root`.
+    """Returns the package_name owning `short_path` (see `package_record_for`).
+
+    Args:
+      short_path: A File's `short_path`.
+      packages: List of `DartPackageInfo` (read for `package_name` and `lib_root`).
+
+    Returns:
+      The matching `package_name`, or `None` if no package owns the path.
+    """
+    record = package_record_for(short_path, packages)
+    return record.package_name if record != None else None
+
+def package_record_for(short_path, packages):
+    """Returns the package record owning `short_path`, by longest matching `lib_root`.
 
     A package owns its `<lib_root>/lib/` subtree and nothing else in the
     directory: `lib/` is what a `package:` URI can reach, and staging strips
@@ -95,9 +108,11 @@ def package_for(short_path, packages):
       packages: List of `DartPackageInfo` (read for `package_name` and `lib_root`).
 
     Returns:
-      The matching `package_name`, or `None` if no package owns the path.
+      The matching record, or `None` if no package owns the path. A package
+      split across several `lib_root`s has a record per root, and the one
+      whose root holds the file is returned.
     """
-    best_name = None
+    best = None
     best_len = -1
     for p in packages:
         lr = p.lib_root
@@ -109,13 +124,13 @@ def package_for(short_path, packages):
         if not lr:
             # Root package: owns `lib/...` files. Lowest precedence.
             if under_lib and best_len < 0:
-                best_name = p.package_name
+                best = p
                 best_len = 0
         elif under_lib or short_path == lr:
             if len(lr) > best_len:
-                best_name = p.package_name
+                best = p
                 best_len = len(lr)
-    return best_name
+    return best
 
 def colocate_packages(ctx, packages, all_srcs, members = {}):
     """Co-locates each package's split source/generated files into one directory.
@@ -186,80 +201,6 @@ def colocate_packages(ctx, packages, all_srcs, members = {}):
             for f in files:
                 srcs2.append(f)
     return packages2, srcs2
-
-def colocate_entrypoint(ctx, main, own_srcs):
-    """Co-locates an entrypoint `main` with its own generated sibling sources.
-
-    A `dart_binary`/`dart_test` whose own `srcs` include a generated file that is
-    a `part`/relative-import sibling of `main` (e.g. a mockito `.mocks.dart`
-    generated for the test file itself) needs `main` and those files in one real
-    directory. When that's the case, assemble them and compile `main` from inside
-    the assembled directory.
-
-    Args:
-      ctx: The rule context (must carry `COPY_TO_DIRECTORY_TOOLCHAINS`).
-      main: The entrypoint `.dart` File.
-      own_srcs: The rule's own `srcs` Files (not those from `deps`).
-
-    Returns:
-      `(main_input, main_arg, extra_inputs)` — `main_input` is the File to add to
-      action inputs (the assembled directory when assembled, else `main`);
-      `main_arg` is the path string to pass as the compile target; `extra_inputs`
-      are `own_srcs` to add as inputs when not assembled (empty when assembled).
-    """
-    if not needs_source_assembly(own_srcs):
-        return main, main.path, own_srcs
-
-    # `.entrysrcs` (vs packages' `.pkgsrcs`) so this dir can't collide with a package dir.
-    assembled = assemble_source_dir(ctx, ctx.label.name + ".main.entrysrcs", [main] + own_srcs)
-    rel = main.short_path
-    if ctx.label.package and rel.startswith(ctx.label.package + "/"):
-        rel = rel[len(ctx.label.package) + 1:]
-    return assembled, assembled.path + "/" + rel, []
-
-def colocate_executable(ctx, packages, dep_srcs, main, own_srcs, own_package = None):
-    """Co-locates an executable's dependencies and its own sources for one compile.
-
-    With no package of its own, the dependencies' packages are co-located and
-    the entrypoint with its generated siblings, separately — see
-    `colocate_packages` and `colocate_entrypoint`. With one (`own_package`), its
-    own sources are members of that package instead, and are assembled with the
-    package's `lib/` whenever any of them is generated, so the entrypoint always
-    sits inside the package root the generated `package_config.json` names.
-
-    Args:
-      ctx: The rule context (must carry `COPY_TO_DIRECTORY_TOOLCHAINS`).
-      packages: The deduplicated `DartPackageInfo` list, `own_package` included.
-      dep_srcs: Flat list of the dependencies' transitive source Files.
-      main: The entrypoint File.
-      own_srcs: The rule's own `srcs` Files.
-      own_package: The executable's own `DartPackageInfo`, or `None`.
-
-    Returns:
-      `struct(packages, srcs, main_input, main_arg, roots)`: the rewritten
-      package list; every File the compile reads; the File holding the
-      entrypoint and the path to compile; and exec-root package roots for
-      `generate_package_config` that no `lib/` file can reveal.
-    """
-    if own_package == None:
-        packages, srcs = colocate_packages(ctx, packages, dep_srcs)
-        main_input, main_arg, own_inputs = colocate_entrypoint(ctx, main, own_srcs)
-        return struct(packages = packages, srcs = srcs + own_inputs, main_input = main_input, main_arg = main_arg, roots = {})
-
-    name = own_package.package_name
-    root = own_package.lib_root
-    packages, srcs = colocate_packages(ctx, packages, dep_srcs, members = {name: [main] + own_srcs})
-    rel = main.short_path[len(root) + 1:] if root else main.short_path
-    for p in packages:
-        if p.package_name == name and p.lib_root != root:
-            # Assembled: the directory is the package root, entrypoint inside.
-            assembled = [f for f in srcs if f.short_path == p.lib_root][0]
-            return struct(packages = packages, srcs = srcs, main_input = assembled, main_arg = assembled.path + "/" + rel, roots = {})
-
-    # Not assembled: every member is a source file where it stands, so the root
-    # is the directory containing them, found from the entrypoint's own path.
-    exec_root = main.path[:len(main.path) - len(rel)].rstrip("/")
-    return struct(packages = packages, srcs = srcs, main_input = main, main_arg = main.path, roots = {name: exec_root})
 
 def _dart_source_set_impl(ctx):
     dst = assemble_source_dir(
