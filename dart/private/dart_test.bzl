@@ -14,19 +14,18 @@ load("//dart/private:build_settings.bzl", "EXTRA_DART_DEFINES_ATTR", "merge_vm_d
 load(
     "//dart/private:common.bzl",
     "DART_ABI_CONSTRAINT_ATTRS",
-    "WINDOWS_CONSTRAINT_ATTR",
     "check_unreplaced_hooks",
     "code_asset_entries",
     "collect_transitive_code_assets",
     "collect_transitive_resources",
-    "collect_transitive_srcs",
-    "create_test_executable",
-    "dart_kernel_action",
     "generate_native_assets_yaml",
+    "kernel_root_path",
     "relative_path",
     "resolve_code_assets",
     "runfiles_path",
+    "stage_code_assets",
     "target_dart_abi",
+    "test_executable",
 )
 load("//dart/private:dart_import_check.bzl", "dart_import_check_aspect", "import_check_validation")
 load(
@@ -35,18 +34,17 @@ load(
     "collect_modules",
     "dart_entry_kernel_action",
     "dart_link_kernel_action",
-    "kernel_package_config",
-    "kernel_root_path",
-    "kernel_roots",
     "module_defines_transition",
     "vm_module_aspect",
+    "whole_program_kernel",
 )
 load("//dart/private:dart_test_runner.bzl", "DartTestRunnerInfo")
+load("//dart/private:exec_groups.bzl", "PORTABLE_EXEC_GROUPS")
 load("//dart/private:executable_package.bzl", "EXECUTABLE_PACKAGE_ATTRS", "executable_package")
 
 def _dart_test_impl(ctx):
-    toolchain = ctx.toolchains["//dart:toolchain_type"]
-    dart_sdk_info = toolchain.dart_sdk_info
+    # The VM that runs the test: the target's, as everything the test runs is.
+    dart_sdk_info = ctx.toolchains["//dart:toolchain_type"].dart_sdk_info
     workspace_name = ctx.workspace_name
     sdk = ctx.attr._kernel_sdk[DartKernelSdkInfo]
 
@@ -72,51 +70,19 @@ def _dart_test_impl(ctx):
         )
     else:
         dill = ctx.actions.declare_file(ctx.label.name + ".dill")
-    runtime_libs = []
-
-    # Transitively propagated assets plus any named outright — see the same
-    # comment in `dart_binary`.
-    resolved_assets = resolve_code_assets(
-        ctx.label,
-        collect_transitive_code_assets(ctx.attr.deps),
-        [dep[DartCodeAssetInfo] for dep in ctx.attr.code_assets],
-    )
-
-    # The code-asset mapping is embedded in the kernel, with `relative` paths
-    # resolved against the dill at run time — the same as `dart_binary`. The
-    # `.so` libraries ship in runfiles.
-    native_assets_yaml = None
-    if resolved_assets:
-        abi = target_dart_abi(ctx)
-        entries, runtime_libs = code_asset_entries(
-            ctx.label,
-            resolved_assets,
-            dill.dirname,
-        )
-        native_assets_yaml = ctx.actions.declare_file(ctx.label.name + ".native_assets.yaml")
-        ctx.actions.write(
-            output = native_assets_yaml,
-            content = generate_native_assets_yaml(abi, entries),
-        )
+    native_assets_yaml, runtime_libs = _code_assets(ctx, dill)
 
     if not ctx.attr._modular_kernel[BuildSettingInfo].value:
         # The whole program from source, as `dart_binary` compiles: what the
         # build-wide escape hatch falls back to.
-        srcs = collect_transitive_srcs(ctx.attr.deps).to_list() + [ctx.file.main, main] + ctx.files.srcs
-        package_config = ctx.actions.declare_file(ctx.label.name + ".package_config.json")
-        ctx.actions.write(package_config, kernel_package_config(packages))
-        dart_kernel_action(
-            ctx = ctx,
-            dart_sdk_info = dart_sdk_info,
+        whole_program_kernel(
+            ctx,
             main = main,
-            transitive_srcs = depset(srcs),
-            package_config = package_config,
+            packages = packages,
             output_dill = dill,
             product = True,
-            main_path = kernel_root_path(main.short_path),
             defines = merge_vm_dart_defines(ctx),
             native_assets_yaml = native_assets_yaml,
-            roots = kernel_roots(srcs),
         )
     else:
         _link_modules(ctx, sdk, main, packages, own, native_assets_yaml, dill)
@@ -125,7 +91,6 @@ def _dart_test_impl(ctx):
     # carries all sources/imports, so runfiles need only the VM and (for code
     # assets) the `.so` libraries.
     env = {
-        "RULES_DART_DART": runfiles_path(dart_sdk_info.dart, workspace_name),
         "RULES_DART_DILL": runfiles_path(dill, workspace_name),
     }
     runner_files = []
@@ -140,12 +105,8 @@ def _dart_test_impl(ctx):
         if key.startswith("RULES_DART_"):
             fail("%s: `env` cannot set %s; rules_dart uses the RULES_DART_ prefix to drive the test" % (ctx.label, key))
         env[key] = ctx.expand_location(value, ctx.attr.data)
-    executable, env_info, tool_runfiles = create_test_executable(
-        ctx,
-        ctx.attr._tool,
-        env = env,
-        env_inherit = ctx.attr.env_inherit,
-    )
+    launcher = test_executable(ctx, ctx.attr._tool)
+    env["RULES_DART_DART"] = runfiles_path(dart_sdk_info.dart, workspace_name)
 
     # A dep's `lib/**` non-Dart files are part of the package at run time under
     # pub, and the dill carries only compiled code — so they come in here, the
@@ -153,19 +114,16 @@ def _dart_test_impl(ctx):
     runfiles = ctx.runfiles(
         files = [dill] + runtime_libs + runner_files + ctx.files.data,
         transitive_files = depset(
-            transitive = [
-                dart_sdk_info.tool_files,
-                collect_transitive_resources(ctx.attr.deps),
-            ],
+            transitive = [dart_sdk_info.tool_files, collect_transitive_resources(ctx.attr.deps)],
         ),
     )
-    runfiles = runfiles.merge(tool_runfiles)
+    runfiles = runfiles.merge(launcher.runfiles)
     for data_dep in ctx.attr.data:
         runfiles = runfiles.merge(data_dep[DefaultInfo].default_runfiles)
 
     return [
-        DefaultInfo(executable = executable, runfiles = runfiles),
-        env_info,
+        DefaultInfo(executable = launcher.executable, runfiles = runfiles),
+        RunEnvironmentInfo(environment = env, inherited_environment = ctx.attr.env_inherit),
         # See `dart_binary`: analyzable and fixable without becoming a valid
         # `deps` entry. Built from `ctx.file.main`, not the bootstrap, because
         # the analyze/fix rules stage by `short_path`.
@@ -178,6 +136,44 @@ def _dart_test_impl(ctx):
             ctx.attr.deps,
         )),
     ]
+
+def _code_assets(ctx, dill):
+    """The test's code-asset mapping, and the libraries it names.
+
+    Args:
+      ctx: The rule context.
+      dill: The test's kernel, against which the mapping's paths resolve.
+
+    Returns:
+      `(native_assets_yaml, libraries)`: the mapping File, or `None` when the
+      test has no code assets, and the libraries for its runfiles.
+    """
+    assets = resolve_code_assets(
+        ctx.label,
+        collect_transitive_code_assets(ctx.attr.deps),
+        [dep[DartCodeAssetInfo] for dep in ctx.attr.code_assets],
+    )
+    if not assets:
+        return None, []
+    abi = target_dart_abi(ctx)
+
+    # The VM resolves a `relative` path against the dill's real location, the
+    # output tree when runfiles are symlinks and the runfiles tree when they
+    # are copies, as on a remote executor. A library from another
+    # configuration (any transition's) is where the two trees disagree, so
+    # each one is linked in beside the dill, where they agree.
+    staged = stage_code_assets(
+        ctx,
+        assets,
+        lambda index: "%s.native/%s/%d" % (ctx.label.name, abi, index),
+    )
+    entries, libraries = code_asset_entries(ctx.label, staged, dill.dirname)
+    native_assets_yaml = ctx.actions.declare_file(ctx.label.name + ".native_assets.yaml")
+    ctx.actions.write(
+        output = native_assets_yaml,
+        content = generate_native_assets_yaml(abi, entries),
+    )
+    return native_assets_yaml, libraries
 
 def _link_modules(ctx, sdk, main, packages, own, native_assets_yaml, dill):
     """Compiles the test's own files and entrypoint against its modules, and links them."""
@@ -365,7 +361,7 @@ declarations are resolved by the front end at that point — the VM cannot suppl
 `@Native` FFI bindings resolve against. When set, the test's `main` is compiled to a kernel \
 with the code-asset mapping embedded (`gen_kernel --native-assets`), and the libraries ship in \
 runfiles so the Dart VM resolves them — no `dart:ffi` ceremony in the test source. Each entry \
-must provide `DartCodeAssetInfo` (see the `dart_code_asset` rule).""",
+must provide `DartCodeAssetInfo` (see the `dart_code_asset` rule). An entry replaces the asset with the same id that `deps` supply, so a test can load a differently built library under that id.""",
             providers = [DartCodeAssetInfo],
         ),
         "env": attr.string_dict(
@@ -380,15 +376,23 @@ told where a runfile is (resolve it with `Runfiles.rlocation()`).""",
         "_tool": attr.label(
             default = "//dart/private/tools:test_runner",
             executable = True,
-            cfg = "exec",
+            cfg = "target",
         ),
-    }, **dict(WINDOWS_CONSTRAINT_ATTR, **dict(DART_ABI_CONSTRAINT_ATTRS, **dict(EXTRA_DART_DEFINES_ATTR, **dict(MODULE_EXECUTABLE_ATTRS, **EXECUTABLE_PACKAGE_ATTRS))))),
+    }, **dict(DART_ABI_CONSTRAINT_ATTRS, **dict(EXTRA_DART_DEFINES_ATTR, **dict(MODULE_EXECUTABLE_ATTRS, **EXECUTABLE_PACKAGE_ATTRS)))),
     test = True,
+    # The compiles are `portable`. The run is Bazel's own `test` group, which
+    # puts it on a host matching the target: everything it runs, the VM and
+    # native `code_assets` included, is built for the target.
     toolchains = ["//dart:toolchain_type"],
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = (
         "Compiles a Dart test to a kernel at build time and runs it with " +
         "asserts enabled. A test with `package:test` in `deps` runs under " +
         "that package's runner, so `--test_filter`, `shard_count` and " +
-        "per-case results work and Bazel's `timeout` is the only time limit."
+        "per-case results work and Bazel's `timeout` is the only time limit. " +
+        "Like any Bazel test it is built for the target platform and runs on " +
+        "a host matching it; to run it elsewhere, build it for that platform " +
+        "(`--platforms`, or a platform transition such as " +
+        "`platform_transition_test`)."
     ),
 )

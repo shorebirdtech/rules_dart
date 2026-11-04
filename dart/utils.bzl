@@ -7,12 +7,18 @@ co-location. These are used by both rules_dart and rules_flutter.
 
 load(
     "//dart/private:common.bzl",
+    _PATH_MAPPING = "PATH_MAPPING",
+    _add_kernel_roots = "add_kernel_roots",
+    _code_asset_identity = "code_asset_identity",
     _collect_packages = "collect_packages",
+    _collect_transitive_code_assets = "collect_transitive_code_assets",
     _collect_transitive_resources = "collect_transitive_resources",
     _collect_transitive_srcs = "collect_transitive_srcs",
     _generate_dev_package_config = "generate_dev_package_config",
     _generate_package_config = "generate_package_config",
     _generate_package_config_content = "generate_package_config_content",
+    _package_code_assets = "package_code_assets",
+    _resolve_code_assets = "resolve_code_assets",
     _runfiles_path = "runfiles_path",
 )
 load("//dart/private:dart_deps.bzl", _DART_TOOLCHAIN_TYPES_ATTR = "DART_TOOLCHAIN_TYPES_ATTR")
@@ -47,13 +53,17 @@ load(
     _dart_link_kernel_action = "dart_link_kernel_action",
     _dart_module_aspect = "dart_module_aspect",
     _kernel_package_config = "kernel_package_config",
-    _kernel_roots = "kernel_roots",
     _module_defines_transition = "module_defines_transition",
+)
+load(
+    "//dart/private:exec_groups.bzl",
+    _EXEC_TOOLS_TOOLCHAIN = "EXEC_TOOLS_TOOLCHAIN",
+    _PORTABLE = "PORTABLE",
+    _PORTABLE_EXEC_GROUPS = "PORTABLE_EXEC_GROUPS",
 )
 load(
     "//dart/private:source_set.bzl",
     _COPY_TO_DIRECTORY_TOOLCHAINS = "COPY_TO_DIRECTORY_TOOLCHAINS",
-    _colocate_entrypoint = "colocate_entrypoint",
     _colocate_packages = "colocate_packages",
 )
 
@@ -113,21 +123,37 @@ generate_package_config = _generate_package_config
 generate_dev_package_config = _generate_dev_package_config
 generate_package_config_content = _generate_package_config_content
 runfiles_path = _runfiles_path
+
+# Code asset resolution, as `dart_binary` and `dart_test` do it, for a rule set
+# that stages a program's native libraries itself. `resolve_code_assets` unions
+# what `collect_transitive_code_assets` reaches with a target's own
+# `code_assets`, one asset per id, and fails on two definitions of one id as
+# `code_asset_identity` tells them apart. `package_code_assets` reads one
+# `DartPackageInfo`'s assets.
+code_asset_identity = _code_asset_identity
+collect_transitive_code_assets = _collect_transitive_code_assets
+package_code_assets = _package_code_assets
+resolve_code_assets = _resolve_code_assets
+
+# The execution requirements of an action that may run once for every
+# configuration building the same thing (`--experimental_output_paths=strip`):
+# add them to an action whose arguments reach output paths only through Files
+# (`Args.add`, `add_all`, `map_each`) and whose generated inputs name none.
+PATH_MAPPING = _PATH_MAPPING
 derive_lib_root = _derive_lib_root
 derive_package_name = _derive_package_name
 
 # Source co-location: assemble a package whose hand-written and generated files
 # straddle the source tree and `bazel-out` into one tree-artifact directory, so
 # `part` directives and a single `rootUri` resolve at compile time. Any rule
-# calling `colocate_packages`/`colocate_entrypoint` must declare
+# calling `colocate_packages` must declare
 # `COPY_TO_DIRECTORY_TOOLCHAINS` in its `toolchains`.
 colocate_packages = _colocate_packages
-colocate_entrypoint = _colocate_entrypoint
 COPY_TO_DIRECTORY_TOOLCHAINS = _COPY_TO_DIRECTORY_TOOLCHAINS
 
 # Run link hooks from inside another rule, for one that compiles its own kernel
-# and so cannot depend on a `dart_link_hook` target without a cycle. The rule
-# declares the `//dart:exec_tools_toolchain_type` toolchain and merges
+# and so cannot depend on a `dart_link_hook` target without a cycle. The hooks
+# run in `PORTABLE`: the rule declares `PORTABLE_EXEC_GROUPS` and merges
 # `link_hook_runner_attr()` into its `attrs`.
 dart_link_hook_actions = _dart_link_hook_actions
 link_hook_runner_attr = _link_hook_runner_attr
@@ -140,16 +166,26 @@ parse_data_asset_ids = _parse_data_asset_ids
 # modules), compiles the entrypoint with `dart_entry_kernel_action` and links
 # with `dart_link_kernel_action`, merging
 # `KERNEL_TOOL_ATTR` into its `attrs`. `kernel_package_config` and
-# `kernel_roots` address sources through the same `org-dartlang-root:///` roots
-# the modules were compiled with.
+# `add_kernel_roots` address sources through the same `org-dartlang-root:///`
+# roots the modules were compiled with.
+#
+# Those compiles, and the import checks below, run in the `PORTABLE` execution
+# group, on any host with a Dart SDK (`EXEC_TOOLS_TOOLCHAIN`), and the kernel
+# tool is built for that host: a rule merging `KERNEL_TOOL_ATTR` declares
+# `exec_groups = PORTABLE_EXEC_GROUPS`, or its own `PORTABLE` group naming
+# `EXEC_TOOLS_TOOLCHAIN` and any toolchains more. `dart_module_aspect`'s
+# `exec_toolchains` adds those to the aspect's.
 dart_module_aspect = _dart_module_aspect
 module_defines_transition = _module_defines_transition
 collect_modules = _collect_modules
 dart_entry_kernel_action = _dart_entry_kernel_action
 dart_link_kernel_action = _dart_link_kernel_action
 kernel_package_config = _kernel_package_config
-kernel_roots = _kernel_roots
+add_kernel_roots = _add_kernel_roots
 KERNEL_TOOL_ATTR = _KERNEL_TOOL_ATTR
+PORTABLE = _PORTABLE
+PORTABLE_EXEC_GROUPS = _PORTABLE_EXEC_GROUPS
+EXEC_TOOLS_TOOLCHAIN = _EXEC_TOOLS_TOOLCHAIN
 
 # A rule whose `DartInfo` dependencies come from a toolchain names the toolchain
 # types in a private `label_list` of this name, so the kernel module aspect

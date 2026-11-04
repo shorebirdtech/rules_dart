@@ -27,6 +27,7 @@ load(
     "//dart/private:common.bzl",
     "DEFAULT_ROOT_LANGUAGE_VERSION",
     "PACKAGE_IDENTITY_ATTRS",
+    "PATH_MAPPING",
     "add_shim_contract_args",
     "asset_path_for",
     "dart_lib_root_for_package",
@@ -34,11 +35,12 @@ load(
     "same_package_library_dep_files",
     "synth_package_config",
 )
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
 
 def _dart_sqlcodegen_impl(ctx):
     identity = resolve_package_identity(ctx)
-    toolchain = ctx.toolchains["//dart:exec_tools_toolchain_type"]
-    sdk_files = toolchain.dart_sdk_info.tool_files
+    sdk = portable_sdk(ctx)
+    sdk_files = sdk.tool_files
 
     if not ctx.attr.output_suffixes:
         fail("%s: `output_suffixes` must contain at least one suffix." %
@@ -81,17 +83,17 @@ def _dart_sqlcodegen_impl(ctx):
     args = ctx.actions.args()
     args.use_param_file("@%s", use_always = True)
     args.set_param_file_format("multiline")
-    args.add("--input", src.path)
+    args.add("--input", src)
     args.add("--input-asset", asset_path_for(src, lib_root))
     for output in outputs:
-        args.add("--output", output.path)
+        args.add("--output", output)
 
     direct = [src] + list(ctx.files.data)
     direct.extend(add_shim_contract_args(
         args,
         ctx,
         synth_pc,
-        toolchain.dart_sdk_info.dart,
+        sdk.dart,
         auto_stage_srcs = auto_staged,
         asset_deps = ctx.files.asset_deps,
         lib_root = lib_root,
@@ -106,8 +108,9 @@ def _dart_sqlcodegen_impl(ctx):
         inputs = depset(direct = direct, transitive = transitive),
         outputs = outputs,
         mnemonic = "DartSqlCodegen",
+        exec_group = PORTABLE,
         progress_message = "DartSqlCodegen %s" % ctx.label,
-        execution_requirements = {
+        execution_requirements = PATH_MAPPING | {
             "supports-workers": "1",
             "requires-worker-protocol": "proto",
             "worker-key-mnemonic": "DartSqlCodegen",
@@ -139,7 +142,7 @@ dart_sqlcodegen = rule(
             doc = "Pre-compiled generator executable matching the " +
                   "rules_dart shim CLI contract.",
             executable = True,
-            cfg = "exec",
+            cfg = config.exec(PORTABLE),
             mandatory = True,
         ),
         "output_suffixes": attr.string_list(
@@ -198,7 +201,7 @@ dart_sqlcodegen = rule(
             allow_files = True,
         ),
     } | PACKAGE_IDENTITY_ATTRS,
-    toolchains = ["//dart:exec_tools_toolchain_type"],
+    exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs a Dart code generator over a non-Dart input (`.drift`, " +
           "`.moor`, …), producing one or more sibling outputs.",
 )
