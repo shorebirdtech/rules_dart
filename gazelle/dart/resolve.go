@@ -86,7 +86,8 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 	var deps []string
 	for _, pkg := range is.SortedPackages() {
 		// A library named for its package doesn't depend on that package.
-		if !is.split && pkg == r.Name() {
+		// A binary or test of that name is no such library: it does.
+		if !is.split && pkg == r.Name() && indexedKinds[r.Kind()] {
 			continue
 		}
 
@@ -113,7 +114,7 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 		// Try to find in the rule index (first-party deps). Skip exact
 		// self-matches (a rule whose package_name is indexed can match its
 		// own import set) but keep legitimate intra-package cross-target
-		// deps — those are filtered above only when pkg == r.Name().
+		// deps — those are filtered above only for a library named pkg.
 		matches := ix.FindRulesByImportWithConfig(c, spec, dartName)
 		matched := false
 		for _, m := range matches {

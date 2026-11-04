@@ -2,6 +2,7 @@ package dart
 
 import (
 	"flag"
+	"slices"
 	"testing"
 
 	"github.com/bazelbuild/bazel-gazelle/config"
@@ -95,6 +96,26 @@ func TestResolvePackageOverrideWinsOverFiles(t *testing.T) {
 	}))
 	if len(got) != 1 || got[0] != "//third_party:path" {
 		t.Fatalf("deps %v, want [//third_party:path]", got)
+	}
+}
+
+func TestResolveOnlyLibraryNamedForPackageSkipsIt(t *testing.T) {
+	for _, tt := range []struct {
+		kind string
+		want []string
+	}{
+		{"dart_binary", []string{"//lib/src/view"}},
+		{"dart_test", []string{"//lib/src/view"}},
+		{"dart_library", nil},
+	} {
+		c, ix, _ := splitRepo(t, "")
+		is := viewImports(map[string][]string{"app": {"package:app/src/view/v.dart"}})
+		is.split = false
+		r := rule.NewRule(tt.kind, "app")
+		NewLanguage().(*dartLang).Resolve(c, ix, nil, r, is, label.New("", "bin", "app"))
+		if got := r.AttrStrings("deps"); !slices.Equal(got, tt.want) {
+			t.Errorf("%s: deps %v, want %v", tt.kind, got, tt.want)
+		}
 	}
 }
 
