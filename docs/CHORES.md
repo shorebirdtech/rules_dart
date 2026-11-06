@@ -437,19 +437,21 @@ buildifier and commitizen revs silently drifted as a result.
 
 ## GitHub Workflow Dependency Bumps
 
-**Trigger**: Periodic or when a dependency releases a version we need.
+**Trigger**: A Dependabot PR (weekly, `.github/dependabot.yml`), or when a
+dependency releases a version we need sooner.
 
 **Files**: All `.github/workflows/*.yaml` files.
 
 **Dependencies** (all `uses:` references across workflows):
 
-- Actions: `actions/checkout`, `bazel-contrib/setup-bazel`, `j178/prek-action`
+- Actions: `actions/checkout`, `bazel-contrib/setup-bazel`
 - Reusable workflows: `bazel-contrib/.github` (CI)
 
 **Procedure**:
 
 1. For each `uses:` reference, check the repo's tags/releases for newer versions
-2. Update the version ref
+2. Update the commit SHA and the `# version` comment after it (refs are
+   pinned to SHAs)
 3. For reusable workflows, review changelogs for new inputs or breaking changes
 4. Keep `actions/checkout` version consistent across all workflows
 
