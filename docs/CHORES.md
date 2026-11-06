@@ -394,9 +394,9 @@ outdated dependencies.
 **Verification**: Both tools run successfully against the repo.
 
 Also update the matching `rev:` values in `.pre-commit-config.yaml` for yamlfmt
-and typos to keep CI and local hooks in sync. When bumping prek, update
-`prek-version` in `.github/workflows/ci.yaml` to match, and run
-`uv tool upgrade prek` so the installed git hooks use the new version.
+and typos to keep CI and local hooks in sync. CI runs prek from
+`multitool.lock.json`; when bumping it, run `uv tool upgrade prek` so the
+installed git hooks use the new version.
 
 **Automation**: `/bump-multitool` slash command. Alternatively, install the
 [multitool CLI](https://github.com/theoremlp/multitool) and run
@@ -437,19 +437,21 @@ buildifier and commitizen revs silently drifted as a result.
 
 ## GitHub Workflow Dependency Bumps
 
-**Trigger**: Periodic or when a dependency releases a version we need.
+**Trigger**: A Dependabot PR (weekly, `.github/dependabot.yml`), or when a
+dependency releases a version we need sooner.
 
 **Files**: All `.github/workflows/*.yaml` files.
 
 **Dependencies** (all `uses:` references across workflows):
 
-- Actions: `actions/checkout`, `bazel-contrib/setup-bazel`, `j178/prek-action`
+- Actions: `actions/checkout`, `bazel-contrib/setup-bazel`
 - Reusable workflows: `bazel-contrib/.github` (CI)
 
 **Procedure**:
 
 1. For each `uses:` reference, check the repo's tags/releases for newer versions
-2. Update the version ref
+2. Update the commit SHA and the `# version` comment after it (refs are
+   pinned to SHAs)
 3. For reusable workflows, review changelogs for new inputs or breaking changes
 4. Keep `actions/checkout` version consistent across all workflows
 

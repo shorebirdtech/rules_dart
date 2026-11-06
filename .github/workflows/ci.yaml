@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
-    uses: bazel-contrib/.github/.github/workflows/bazel.yaml@v7.7.0
+    uses: bazel-contrib/.github/.github/workflows/bazel.yaml@1d798ff015ed0696433e01e2c3ccbb2abefadad7 # v7.7.0
     with:
       bazel_versions: '["9.3.0"]'
       # Exit code 4 means "build succeeded but no test targets found", which is
@@ -81,7 +81,7 @@ jobs:
           - name: manifest runfiles, local
             flags: "--noenable_runfiles --spawn_strategy=standalone"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: analysis — ${{ matrix.name }}
         working-directory: e2e/analysis
         # Exit code 4: the workspace has no test targets, only the aspect's
@@ -99,7 +99,7 @@ jobs:
       matrix:
         folder: [".", "e2e/dart_test", "e2e/codegen"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: dart_test whole-program — ${{ matrix.folder }}
         working-directory: ${{ matrix.folder }}
         run: bazel test --test_output=errors --@rules_dart//dart:modular_kernel=false //...
@@ -108,7 +108,7 @@ jobs:
   expected-failure:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: pub_lock_conflict — expect version conflict error
         working-directory: e2e/pub_lock_conflict
         run: |
@@ -356,7 +356,7 @@ jobs:
   dbg-mode:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: hello_world — build all compile modes under -c dbg
         working-directory: e2e/hello_world
         run: bazel build -c dbg //...
@@ -366,11 +366,9 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: j178/prek-action@v3.0.1
-        with:
-          # Keep in step with prek in multitool.lock.json
-          prek-version: 0.5.5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The prek pinned in multitool.lock.json
+      - run: bazel run @multitool//tools/prek -- -C "$PWD" run --all-files --show-diff-on-failure
   # For branch protection settings, this job provides a "stable" name that can be used to gate PR merges
   # on "all matrix jobs were successful".
   conclusion:
