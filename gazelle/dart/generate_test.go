@@ -1,7 +1,11 @@
 package dart
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/bazelbuild/bazel-gazelle/config"
 )
 
 func TestStageTargetName(t *testing.T) {
@@ -142,5 +146,73 @@ func TestAllRegisteredProducedExtensionsSorted(t *testing.T) {
 		if got[i] < got[i-1] {
 			t.Fatalf("extensions not sorted: %v", got)
 		}
+	}
+}
+
+func TestPackageRelPath(t *testing.T) {
+	writePubspec := func(t *testing.T, root, rel string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, rel, "pubspec.yaml"), []byte("name: p\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nested := t.TempDir()
+	for _, d := range []string{"a/pkg/bin/sub", "a/pkg/example/bin", "nameless/bin", "nopkg/bin", "decl/bin"} {
+		if err := os.MkdirAll(filepath.Join(nested, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writePubspec(t, nested, "a/pkg")
+	writePubspec(t, nested, "a/pkg/example")
+	if err := os.WriteFile(filepath.Join(nested, "nameless/pubspec.yaml"), []byte("description: x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	atRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(atRoot, "tools/bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePubspec(t, atRoot, "")
+
+	declCfg := &config.Config{Exts: map[string]interface{}{
+		extKeyPackageDecl: &packageDecl{Rel: "decl", Name: "decl_pkg", PackageName: "decl"},
+	}}
+	plain := &config.Config{Exts: map[string]interface{}{}}
+	tests := []struct {
+		root, rel, want string
+		c               *config.Config
+	}{
+		{nested, "a/pkg", "", plain},
+		{nested, "a/pkg/bin", "bin", plain},
+		{nested, "a/pkg/bin/sub", "bin/sub", plain},
+		{nested, "a/pkg/example/bin", "bin", plain},
+		{nested, "nameless/bin", "nameless/bin", plain},
+		{nested, "nopkg/bin", "nopkg/bin", plain},
+		{nested, "decl/bin", "bin", declCfg},
+		{atRoot, "bin", "bin", plain},
+		{atRoot, "tools/bin", "tools/bin", plain},
+	}
+	for _, tt := range tests {
+		if got := packageRelPath(tt.c, filepath.Join(tt.root, tt.rel), tt.rel); got != tt.want {
+			t.Errorf("packageRelPath(%q) = %q, want %q", tt.rel, got, tt.want)
+		}
+	}
+}
+
+// A package below the workspace root gets dart_binary for bin/.
+func TestNestedPackageBin(t *testing.T) {
+	root := t.TempDir()
+	pkg := filepath.Join(root, "apps", "server")
+	if err := os.MkdirAll(filepath.Join(pkg, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "pubspec.yaml"), []byte("name: server\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "bin", "main.dart"), []byte("void main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := generate(t, &dartLang{}, root, "apps/server/bin", []string{"main.dart"}, "")
+	if r, _ := findRule(res, "main"); r == nil || r.Kind() != "dart_binary" {
+		t.Errorf("got %v, want dart_binary %q", res.Gen, "main")
 	}
 }

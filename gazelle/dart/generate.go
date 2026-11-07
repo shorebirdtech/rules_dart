@@ -64,13 +64,15 @@ func (d *dartLang) generateDartRules(args language.GenerateArgs) language.Genera
 	// `produces=` extension.
 	dartFiles = filterOutGeneratedFiles(dartFiles, registry)
 
-	// Classify files by conventional directory.
+	// Classify files by conventional directory. bin/ is relative to the
+	// Dart package root so packages below the workspace root classify too.
+	pkgRel := packageRelPath(args.Config, args.Dir, args.Rel)
 	var libFiles, binFiles, testFiles []DartFileInfo
 	for _, f := range dartFiles {
 		switch {
 		case isInDir(args.Rel, "test") || strings.HasSuffix(f.Path, "_test.dart"):
 			testFiles = append(testFiles, f)
-		case isInDir(args.Rel, "bin"):
+		case isInDir(pkgRel, "bin"):
 			binFiles = append(binFiles, f)
 		default:
 			libFiles = append(libFiles, f)
@@ -604,6 +606,41 @@ func libraryName(rel string, dir string, c *config.Config) string {
 		return "lib"
 	}
 	return path.Base(rel)
+}
+
+// packageRelPath returns rel relative to the root of the Dart package
+// holding it: the nearer of the nearest directory with a named pubspec.yaml
+// (as FindPubspecName finds it) and the nearest `dart_package_metadata`.
+// With neither, the workspace root is the package root.
+func packageRelPath(c *config.Config, dir string, rel string) string {
+	root := ""
+	current, remaining := dir, rel
+	for {
+		if ParsePubspecName(current) != "" {
+			root = remaining
+			break
+		}
+		if remaining == "" {
+			break
+		}
+		remaining = path.Dir(remaining)
+		if remaining == "." {
+			remaining = ""
+		}
+		current = filepath.Dir(current)
+	}
+	if d, ok := c.Exts[extKeyPackageDecl].(*packageDecl); ok && d != nil &&
+		len(d.Rel) > len(root) && (rel == d.Rel || isInDir(rel, d.Rel)) {
+		root = d.Rel
+	}
+	switch root {
+	case "":
+		return rel
+	case rel:
+		return ""
+	default:
+		return strings.TrimPrefix(rel, root+"/")
+	}
 }
 
 func isInDir(rel string, dir string) bool {
