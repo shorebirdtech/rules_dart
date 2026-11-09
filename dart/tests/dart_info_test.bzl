@@ -377,3 +377,57 @@ language_version_passthrough_test = analysistest.make(
         "expected_package": attr.string(mandatory = True),
     },
 )
+
+def _gen_dart_dir_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name)
+    ctx.actions.run_shell(outputs = [out], command = "echo '// generated' > %s/gen.dart" % out.path)
+    return [DefaultInfo(files = depset([out]))]
+
+gen_dart_dir = rule(
+    implementation = _gen_dart_dir_impl,
+    doc = "A tree artifact holding one Dart file, as a generator would make.",
+)
+
+def _dir_library_impl(ctx):
+    return [
+        DefaultInfo(files = depset(ctx.files.dir)),
+        dart_info(
+            label = ctx.label,
+            package_name = ctx.attr.package_name,
+            lib_root = ctx.label.package,
+            deps = [],
+            srcs = ctx.files.dir,
+            language_version = "",
+        ),
+    ]
+
+dir_library = rule(
+    implementation = _dir_library_impl,
+    attrs = {
+        "dir": attr.label(mandatory = True),
+        "package_name": attr.string(mandatory = True),
+    },
+    doc = "A library whose source is a generated directory.",
+)
+
+def _import_check_inputs_test_impl(ctx):
+    # The import check reads only the names of its dependencies' files, so
+    # they reach it as arguments, not inputs; a dependency's generated
+    # directory is still staged, since its files are known only by listing it.
+    env = analysistest.begin(ctx)
+    checks = [a for a in analysistest.target_actions(env) if a.mnemonic == "DartImportCheck"]
+    asserts.equals(env, 1, len(checks), "the executable's own import check")
+    inputs = [f.short_path for f in checks[0].inputs.to_list()]
+    asserts.true(
+        env,
+        [p for p in inputs if p.endswith("/lib/dep.dart")] == [],
+        "a dependency's source is an input of the import check: %s" % inputs,
+    )
+    asserts.true(
+        env,
+        [p for p in inputs if p.endswith("/gen_dir")] != [],
+        "a dependency's generated directory is not an input of the import check: %s" % inputs,
+    )
+    return analysistest.end(env)
+
+import_check_inputs_test = analysistest.make(_import_check_inputs_test_impl)
