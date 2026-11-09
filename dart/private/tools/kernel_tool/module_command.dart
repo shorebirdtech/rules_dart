@@ -72,8 +72,14 @@ Future<int> runModule(
   final index = ModuleIndex(deps, own: manifest);
   final digested = Digests(digests);
   final shared = worker != null;
+  // The module being compiled, for a compile that never ends.
+  var compiling = const <String>[];
   try {
-    var compiled = 0;
+    // Whether the compiler's state is one it can build on: only a compile
+    // that succeeded leaves one. After a compile that reused the state and
+    // failed, `kernel_worker` can take the next compile that reuses it and
+    // never answer.
+    var reusable = false;
     for (var i = 0; i < planned.length; i++) {
       final plan = planned[i];
       final record = manifest.modules[i];
@@ -89,6 +95,7 @@ Future<int> runModule(
       final output = '$outputDir/$i.dill';
       final summaries = [for (final m in reach.order) m.dillPath!];
       final sources = [...plan.libraries, ...plan.parts];
+      compiling = sources;
       worker ??= KernelWorker(args.one('runtime'), args.one('snapshot'));
       final result = await worker.compile(
         [
@@ -113,7 +120,7 @@ Future<int> runModule(
           // this target's classes to stale ones — Flutter widgets that were no
           // longer `Widget`s.
           '--use-incremental-compiler',
-          if (compiled > 0) '--reuse-compiler-result',
+          if (reusable) '--reuse-compiler-result',
           for (final summary in summaries) ...['--input-summary', summary],
           for (final uri in sources) ...['--source', uri],
           '--output',
@@ -126,8 +133,8 @@ Future<int> runModule(
         ],
         digested,
       );
-      compiled++;
-      if (result.exitCode == 0 && File(output).existsSync()) {
+      reusable = result.exitCode == 0 && File(output).existsSync();
+      if (reusable) {
         record
           ..status = statusOk
           ..dill = '$i.dill';
@@ -138,6 +145,9 @@ Future<int> runModule(
           ..reason = 'does not compile\n${_diagnostics(result.output)}';
       }
     }
+  } on CompilerStalled catch (e) {
+    err.writeln('kernel_tool: $label: $e compiling ${compiling.join(', ')}');
+    return 1;
   } finally {
     if (!shared) await worker?.close();
   }

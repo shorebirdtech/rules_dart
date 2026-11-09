@@ -1,5 +1,6 @@
 // Running the SDK's compilers: `kernel_worker` as a persistent worker for
 // modules, `frontend_server` once for an entrypoint.
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -34,16 +35,34 @@ class Digests {
 /// Dart's forked child holding `kernel_worker`'s stdin open, so it never exits.
 const maxCompiles = 100;
 
+/// How long one module's compile may take before the action fails. A
+/// `kernel_worker` that stops answering would otherwise hold the action
+/// forever: nothing else puts a limit on a request. Far longer than any
+/// module takes, so only a compiler that has stopped reaches it.
+const compileDeadline = Duration(minutes: 10);
+
+/// `kernel_worker` gave no answer within [KernelWorker.deadline].
+class CompilerStalled implements Exception {
+  const CompilerStalled(this.deadline);
+
+  final Duration deadline;
+
+  @override
+  String toString() =>
+      'kernel_worker gave no answer in ${deadline.inSeconds} seconds';
+}
+
 /// A `kernel_worker` that stays up between modules, so the platform and the
 /// modules a compile reads are loaded once, not once per module. In a Bazel
 /// worker it stays up between targets too, and is restarted after
 /// [maxCompiles]; a restart costs a reload and changes no output, since what
 /// it reuses is keyed by digests.
 class KernelWorker {
-  KernelWorker(this.runtime, this.snapshot);
+  KernelWorker(this.runtime, this.snapshot, {this.deadline = compileDeadline});
 
   final String runtime;
   final String snapshot;
+  final Duration deadline;
 
   BazelWorkerDriver? _driver;
 
@@ -71,7 +90,8 @@ class KernelWorker {
 
   /// Compiles with [arguments]. [inputs] are the files the compile reads that
   /// can change between requests, whose digests tell the worker what it may
-  /// reuse.
+  /// reuse. Throws [CompilerStalled], after stopping the compiler, if it gives
+  /// no answer within [deadline].
   Future<CompileResult> compile(
     List<String> arguments,
     List<String> inputs,
@@ -80,16 +100,24 @@ class KernelWorker {
     final here = Directory.current.path;
     if (_startedIn != here) await close();
     _startedIn = here;
-    final response = await (_driver ??= _start()).doWork(
-      WorkRequest(
-        arguments: arguments,
-        inputs: [
-          for (final path in inputs)
-            Input(path: path, digest: digests.of(path)),
-        ],
-        requestId: ++_requests,
-      ),
-    );
+    final WorkResponse response;
+    try {
+      response = await (_driver ??= _start())
+          .doWork(
+            WorkRequest(
+              arguments: arguments,
+              inputs: [
+                for (final path in inputs)
+                  Input(path: path, digest: digests.of(path)),
+              ],
+              requestId: ++_requests,
+            ),
+          )
+          .timeout(deadline);
+    } on TimeoutException {
+      await close();
+      throw CompilerStalled(deadline);
+    }
     if (++_compiles >= maxCompiles) await close();
     return (exitCode: response.exitCode, output: response.output);
   }
