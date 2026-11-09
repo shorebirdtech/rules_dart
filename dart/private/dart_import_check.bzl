@@ -91,6 +91,13 @@ def dart_import_check_action(ctx, kernel_tool, name, srcs, own_package, deps, in
     )
     dep_srcs = depset(transitive = [info.transitive_srcs for info in dep_infos])
 
+    # The check reads only the names of its dependencies' files, which go on
+    # the command line, so they aren't inputs: a dependency's edit doesn't rerun
+    # the check, and a sandbox doesn't stage every file the target reaches. A
+    # tree artifact (a generated directory) is the exception: its files are
+    # known only by listing it.
+    dep_dirs = [f for f in dep_srcs.to_list() if f.is_directory]
+
     # Package records by name, the target's own first, for mapping files to
     # `package:` URIs; two hubs supplying one package agree on its name.
     by_name = {}
@@ -121,7 +128,7 @@ def dart_import_check_action(ctx, kernel_tool, name, srcs, own_package, deps, in
     ctx.actions.run(
         executable = kernel_tool,
         arguments = ["check", args],
-        inputs = depset(srcs + [package_config], transitive = [dep_srcs]),
+        inputs = srcs + [package_config] + dep_dirs,
         outputs = [result],
         mnemonic = "DartImportCheck",
         exec_group = PORTABLE,
