@@ -1,9 +1,12 @@
-load("//dart:defs.bzl", "dart_code_asset", "dart_library")
+load("//dart:defs.bzl", "dart_binary", "dart_code_asset", "dart_library")
 load(
     "//dart/tests:dart_info_test.bzl",
     "analyzable_with_package_test",
+    "dir_library",
     "facade_library",
     "forwards_closures_test",
+    "gen_dart_dir",
+    "import_check_inputs_test",
     "language_version_passthrough_test",
     "misowned_asset_test",
     "no_package_empty_test",
@@ -163,4 +166,31 @@ misowned_asset_test(
     name = "misowned_asset_test",
     size = "small",
     target_under_test = ":misowned_wrapper",
+)
+
+# An executable reaching a library of sources and one of a generated directory:
+# its import check stages the directory and not the sources.
+gen_dart_dir(name = "gen_dir")
+
+dir_library(
+    name = "dir_lib",
+    package_name = "info_gen",
+    dir = ":gen_dir",
+)
+
+dart_binary(
+    name = "checked_bin",
+    main = "checked_main.dart",
+    # Analyzed by the test only: both libraries share this directory's root.
+    tags = ["manual"],
+    deps = [
+        ":dep",
+        ":dir_lib",
+    ],
+)
+
+import_check_inputs_test(
+    name = "import_check_inputs_test",
+    size = "small",
+    target_under_test = ":checked_bin",
 )

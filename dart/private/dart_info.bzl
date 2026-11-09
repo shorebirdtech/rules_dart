@@ -469,6 +469,10 @@ def _merged_dart_info(
             direct = srcs,
             transitive = [info.transitive_srcs for info in dep_infos],
         ),
+        transitive_src_dirs = depset(
+            direct = [f for f in srcs if f.is_directory],
+            transitive = [transitive_src_dirs(info) for info in dep_infos],
+        ),
         # Beside `transitive_srcs`, never inside it: the two lists are routed to
         # different places. Everything that stages a whole package — the
         # analyzer's project tree, a binary's runfiles — wants both; everything
@@ -500,3 +504,17 @@ def _merged_dart_info(
             ],
         ),
     )
+
+def transitive_src_dirs(info):
+    """`info.transitive_src_dirs`, or, for a `DartInfo` built without it, the directories of its `transitive_srcs`.
+
+    Args:
+      info: A `DartInfo`.
+
+    Returns:
+      A depset of the tree artifacts among `info.transitive_srcs`.
+    """
+    dirs = getattr(info, "transitive_src_dirs", None)
+    if dirs != None:
+        return dirs
+    return depset([f for f in info.transitive_srcs.to_list() if f.is_directory])
