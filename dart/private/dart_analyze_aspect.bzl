@@ -244,7 +244,7 @@ def _add_analyzer(ctx, args):
     if not ctx.attr._analysis_shutdown_workaround[BuildSettingInfo].value:
         args.add("--dart-cli")
 
-def _analyze(ctx, name, staged, sdk_inputs):
+def _analyze(ctx, name, staged, sdk_inputs, resource_set):
     """Declares the `dart analyze` action; returns the stamp it writes on success."""
     dart_sdk_info = portable_sdk(ctx)
     stamp = ctx.actions.declare_file(name + ".analyzed")
@@ -261,7 +261,7 @@ def _analyze(ctx, name, staged, sdk_inputs):
         outputs = [stamp],
         mnemonic = "DartAnalyze",
         exec_group = PORTABLE,
-        resource_set = analysis_resources,
+        resource_set = resource_set,
         progress_message = "Analyzing Dart sources of %{label}",
         env = SDK_ENV,
         execution_requirements = PATH_MAPPING,
@@ -377,11 +377,14 @@ def _dart_analyze_aspect_impl(target, ctx):
     own_paths = sorted([f.short_path for f in own.values()])
 
     name = ctx.label.name + ".dart_analyze"
+    srcs = info.transitive_srcs.to_list()
+    dart_files = len({f.path: None for f in srcs + entry + package_srcs if f.extension == "dart"})
+    resource_set = analysis_resources(dart_files)
     staged = stage_config_project(
         ctx,
         ctx.attr._config[DartAnalysisConfigInfo],
         info.transitive_packages.to_list(),
-        info.transitive_srcs.to_list() + info.transitive_resources.to_list() + entry + own.values(),
+        srcs + info.transitive_resources.to_list() + entry + own.values(),
         own.values(),
         name,
         portable_sdk(ctx).version,
@@ -393,7 +396,7 @@ def _dart_analyze_aspect_impl(target, ctx):
     tags = getattr(ctx.rule.attr, "tags", [])
     groups = {}
     if NO_ANALYZE_TAG not in tags:
-        groups["dart_analyze"] = depset([_analyze(ctx, name, staged, sdk_inputs)])
+        groups["dart_analyze"] = depset([_analyze(ctx, name, staged, sdk_inputs, resource_set)])
     if NO_FORMAT_TAG not in tags:
         by_version = _format_language_versions(info, own_paths)
         groups["dart_format"] = depset([
@@ -435,7 +438,7 @@ def _dart_analyze_aspect_impl(target, ctx):
         outputs = [fixes, manifest, scratch],
         mnemonic = "DartFix",
         exec_group = PORTABLE,
-        resource_set = analysis_resources,
+        resource_set = resource_set,
         progress_message = "Computing Dart fixes for %{label}",
         env = SDK_ENV,
         execution_requirements = PATH_MAPPING,
