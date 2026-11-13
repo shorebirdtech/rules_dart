@@ -3,6 +3,13 @@
 visibility("//dart/...")
 
 TOOL_VERSIONS = {
+    "3.14.0": {
+        "macos-arm64": "84ce7e50f18a724d6a29b33af5c4a16b160e9fb64622e12d575b3c9e3420509b",
+        "macos-x64": "91fff6ade4d81e02a4b568a6f5bfa037756fbfa1cc911c998e006b166547c05f",
+        "linux-x64": "90f7fd75fe21e16437778df882f280910d9bbd4809c90024f21de82435dded1d",
+        "linux-arm64": "2bb9a19418ced8d9f5cc9e7faa2dcbbc7dc93882b287b8cd8db859efa191c888",
+        "windows-x64": "9364024364325137b0db4cbfd36b178dd76ade7ec2f496846fc1e7e5bea6a681",
+    },
     "3.13.7": {
         "macos-arm64": "9f972ee1e1139cb4f845f35c7c77bef269dd2ec727b239fb17a2ebcb66d0fb2f",
         "macos-x64": "44caf063178ac7680060fe14c2247532c652874d38f1016bf45cf475c86e44b5",
@@ -39,6 +46,30 @@ TOOL_VERSIONS = {
 # `dartaotruntime_{target}`. `dart_cross_tools` fetches them instead, so the
 # compile action needs no network.
 CROSS_TOOL_VERSIONS = {
+    "3.14.0": {
+        "dartaotruntime_linux_arm": "bf41783424c8bc5755b98a74425d51446d6cc19eaafac40a945351d1a0ca780a",
+        "dartaotruntime_linux_arm64": "4c0e6f09c2ea7601d5d410bf1192ddace65d95fd40613ba980a265d4e5bc6f92",
+        "dartaotruntime_linux_riscv64": "50991a1d6fbe2db4eba0a1893b6a307156bbdebcaef2bbd727e6f324abdd6e68",
+        "dartaotruntime_linux_x64": "c97004ecd074ebabc2eb09e69cb9f35f7345eb5a168ca2bec21815668da4f82a",
+        "gen_snapshot_linux_arm64_linux_arm": "f2cf6c4c4c8296a1fa80470542a6dc771b8a28e64bb1139f0a4bfc01f6d57153",
+        "gen_snapshot_linux_arm64_linux_riscv64": "ac2742fbdf32ec2f39be71938f9f8a8d35bad7d488bef9b1e962d47ee7cb33a8",
+        "gen_snapshot_linux_arm64_linux_x64": "3c54bc85d52f65e87b702ea00a2a80ca306049321a02b96991f442dd42599ffa",
+        "gen_snapshot_linux_x64_linux_arm": "b186a32df97c25dc240d71d520f4ddb8d656eaaa2544a54a8de693e647b8e20a",
+        "gen_snapshot_linux_x64_linux_arm64": "9200d51fc8abd2f6516293d594c9e87850e579966d9be9023f645be6c45e407c",
+        "gen_snapshot_linux_x64_linux_riscv64": "e458747bbd22e6013ee638fc4f8e40eecf46239e670178f9be251ef88fad43d2",
+        "gen_snapshot_macos_arm64_linux_arm": "66ae4c8d1b180e55a8dc4f62ee5f4a5ae1d0dc91676a110fb453d0c008ca23e9",
+        "gen_snapshot_macos_arm64_linux_arm64": "46f697ea3580623d5e1efc595ff81132425d68d0ba4139c6b643c9c105ba7c41",
+        "gen_snapshot_macos_arm64_linux_riscv64": "6113fc9ed55bc84bbd7edeacddeb6f882e108c3cefbc9bd039e26af35eac3ad3",
+        "gen_snapshot_macos_arm64_linux_x64": "e0cea0d77ec8b72d5fd5995f5939945f06a77d749c34b7b8b349ada305b08801",
+        "gen_snapshot_macos_x64_linux_arm": "18ee005e8a03d258e688627cc4f0dd74482cf2d3bd89ad7c3b14745137b86a43",
+        "gen_snapshot_macos_x64_linux_arm64": "736bba06ccccb8294384ec7e2e820798a4c0b3abab9667dc7c9fd18f857b133e",
+        "gen_snapshot_macos_x64_linux_riscv64": "da16f74edcc0449bfcd159e660d0d48edac0450a0c92ee9c0904e59b3ef88a11",
+        "gen_snapshot_macos_x64_linux_x64": "7d29c51a2fb8534324f51120b8d988a4806353bd09de114f6ef050a3080d47be",
+        "gen_snapshot_windows_x64_linux_arm.exe": "20ba77922cddd1387ea208be07014032a6041ea5e0eb760d55132c978be55e69",
+        "gen_snapshot_windows_x64_linux_arm64.exe": "5235d7eb8be8124c2f4d7913ef46b83ff0c8e157757c2118afd6055b0f8fae85",
+        "gen_snapshot_windows_x64_linux_riscv64.exe": "886436bf1cf5cd92dce8ffe89ebf2c0f476c704c2be69771cb27d9efab8a322d",
+        "gen_snapshot_windows_x64_linux_x64.exe": "ea35080d6dea8a079ccdde30e86c3d6536747147e69fba778f52faf681e743f3",
+    },
     "3.13.7": {
         "dartaotruntime_linux_arm": "45015883bc8e54e7d85efe29abdffed9885507cadb88b5d277dbb574c0725297",
         "dartaotruntime_linux_arm64": "b589bcfa4005be37ed1e34bf8189f7fcf2ef486583e275ea777cfa823b0ea133",
