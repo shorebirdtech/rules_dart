@@ -4,7 +4,7 @@ Runs a `package:build` Builder (via the rules_dart shim runner) over a
 single Dart source file, producing one or more sibling output files whose
 paths derive from the input's stem + each entry in `output_suffixes`.
 
-The generator (`generator` script or `generator_bin` binary) receives:
+The generator receives:
 
   - `--input <path>`: the input source file's exec-root path.
   - `--input-asset <asset>`: the input's Dart asset path, relative to the
@@ -22,8 +22,10 @@ The generator (`generator` script or `generator_bin` binary) receives:
     `package_config` attr when set.
   - `--root-language-version <major.minor>`: the consuming package's Dart
     language version (propagated through the synthesised PackageConfig).
-  - `--sdk-path <path>`: the Dart SDK root (the analyzer's AOT shim can't
-    auto-detect it).
+  - `--sdk-summary <path>`: the summary of the Dart SDK the generator wrote
+    itself, for a generator built on the shim runner; or `--sdk-path <path>`,
+    the SDK's root, when a `sky_engine` is among the packages (see
+    `docs/ext.md`). A generator not built on the shim runner gets neither.
   - Anything in `generator_args` (escape hatch — prefer the typed attrs).
 
 Usage:
@@ -33,9 +35,9 @@ Usage:
     dart_codegen(
         name = "user_g",
         src = "lib/user.dart",
-        generator_bin = "@rules_dart//dart/ext/json_serializable:shim",
+        generator = "@rules_dart//dart/ext/json_serializable:shim",
         output_suffixes = [".json_serializable.g.part"],
-        package_name = "my_pkg",
+        package = ":pubspec-metadata",
         deps = [
             ":models",                          # same-package sibling
             "@pub_deps//:json_annotation",      # import source
@@ -44,34 +46,41 @@ Usage:
 
 `deps` is a list of `dart_library`-shaped targets (anything exporting
 `DartInfo`). Their transitive sources populate a `package_config.json`
-so `package:` imports resolve; any file that belongs to the *same* Dart
-package as `src` is also auto-staged as `--dep` so the Resolver can walk
-sibling files without the caller listing them explicitly.
+so `package:` imports resolve; any of their files under the `lib/` of the
+Dart package `src` belongs to is also auto-staged as `--dep` so the Resolver
+can walk sibling files without the caller listing them explicitly.
 
 The generated files can be used as srcs in a downstream `dart_library`.
 
-When `generator_bin` is set, actions run through a persistent Bazel worker
-(singleplex, protobuf protocol) via `dart/ext/lib/worker_entry.dart` +
-`package:bazel_worker`. The analyzer driver is fresh per request —
+Actions run through a persistent Bazel worker (singleplex, protobuf
+protocol) via `dart/ext/lib/worker_entry.dart` + `package:bazel_worker`,
+so the generator must speak that protocol. The analyzer driver is fresh per request —
 reusing across requests is a silent-corruption hazard due to
 `source_gen`'s CWD-pinned `rootPackageName` — but the Dart VM startup
 cost is amortised across the worker's lifetime.
 """
 
-load("//dart:providers.bzl", "DartInfo", "DartPackageMetadataInfo")
+load(
+    "//dart/private:codegen_deps.bzl",
+    "CODEGEN_DEPS_ATTRS",
+    "CODEGEN_DEP_PROVIDERS",
+    "CODEGEN_MEMBER_DEPS_DOC",
+    "codegen_deps",
+)
+load("//dart/private:codegen_sdk_summary.bzl", "codegen_sdk_args", "codegen_sdk_summary_aspect")
 load(
     "//dart/private:common.bzl",
-    "DEFAULT_ROOT_LANGUAGE_VERSION",
-    "PACKAGE_IDENTITY_ATTRS",
     "PATH_MAPPING",
     "add_shim_contract_args",
     "asset_path_for",
-    "dart_lib_root_for_package",
+    "codegen_identity",
+    "package_identity_attrs",
     "resolve_package_identity",
-    "same_package_library_dep_files",
-    "synth_package_config",
 )
-load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS")
+load("//dart/private:runtime.bzl", "non_dart_transition")
+
+visibility("//dart/...")
 
 def compute_codegen_output_name(src_path, output_suffix):
     """Compute the output file path for a codegen source file.
@@ -93,48 +102,14 @@ def compute_codegen_output_name(src_path, output_suffix):
 
 def _dart_codegen_impl(ctx):
     identity = resolve_package_identity(ctx)
-    sdk = portable_sdk(ctx)
-    dart = sdk.dart
-    sdk_files = sdk.tool_files
 
-    if ctx.file.generator and ctx.executable.generator_bin:
-        fail("%s: only one of `generator` or `generator_bin` may be set." %
-             ctx.label)
-    if not ctx.file.generator and not ctx.executable.generator_bin:
-        fail("%s: either `generator` or `generator_bin` must be set." %
-             ctx.label)
     if not ctx.attr.output_suffixes:
         fail("%s: `output_suffixes` must contain at least one suffix." %
              ctx.label)
 
     src = ctx.file.src
-    synth_pc, library_dep_srcs = synth_package_config(ctx, ctx.attr.deps)
-
-    # Derive the Dart package's lib_root from deps' DartInfo — works even
-    # when the codegen rule's Bazel package path doesn't match the Dart
-    # package root (e.g. `//myapp/lib:codegen` for Dart package `myapp`).
-    lib_root_from_deps = dart_lib_root_for_package(
-        ctx.attr.deps,
-        identity.package_name,
-    )
-
-    # Otherwise a `package` declaration's root (a rule in one directory of
-    # a package declared above it), else the rule's own directory.
-    if lib_root_from_deps != None:
-        lib_root = lib_root_from_deps
-    elif identity.root != None:
-        lib_root = identity.root
-    else:
-        lib_root = ctx.label.package
-
-    # Auto-stage same-package sibling files discovered in `deps` so builders
-    # (stacked, mockito, cross-file resolvers, …) see them via the Resolver /
-    # `findAssets` / `readAsString` without users hand-listing every file.
-    auto_staged, _ = same_package_library_dep_files(
-        ctx.attr.deps,
-        identity.package_name,
-        exclude_paths = [src.path],
-    )
+    inputs = codegen_deps(ctx, identity, exclude_paths = [src.path])
+    package_root = inputs.package_root
 
     # Place each output next to the source. declare_file paths are package-
     # relative, so compute a package-relative stem by stripping the Bazel
@@ -151,92 +126,52 @@ def _dart_codegen_impl(ctx):
     args = ctx.actions.args()
     direct_inputs = [src] + list(ctx.files.data)
 
-    if ctx.executable.generator_bin:
-        # Worker mode requires a single `@flagfile` / `--flagfile=` arg; the
-        # `use_param_file` + `multiline` format produces exactly that and
-        # Bazel expands it into `WorkRequest.arguments` on the transport.
-        args.use_param_file("@%s", use_always = True)
-        args.set_param_file_format("multiline")
-        args.add("--input", src)
-        args.add("--input-asset", asset_path_for(src, lib_root))
-        for output in outputs:
-            args.add("--output", output)
-        direct_inputs.extend(add_shim_contract_args(
-            args,
-            ctx,
-            synth_pc,
-            dart,
-            auto_stage_srcs = auto_staged,
-            asset_deps = ctx.files.asset_deps,
-            lib_root = lib_root,
-        ))
-        args.add_all(ctx.attr.generator_args)
+    # Worker mode requires a single `@flagfile` / `--flagfile=` arg; the
+    # `use_param_file` + `multiline` format produces exactly that and
+    # Bazel expands it into `WorkRequest.arguments` on the transport.
+    args.use_param_file("@%s", use_always = True)
+    args.set_param_file_format("multiline")
+    args.add("--input", src)
+    args.add("--input-asset", asset_path_for(src, package_root))
+    for output in outputs:
+        args.add("--output", output)
+    direct_inputs.extend(add_shim_contract_args(
+        args,
+        ctx,
+        inputs,
+        asset_deps = ctx.files.asset_deps,
+    ))
+    sdk_files = codegen_sdk_args(args, ctx, inputs.packages)
+    args.add_all(ctx.attr.generator_args)
 
-        ctx.actions.run(
-            executable = ctx.executable.generator_bin,
-            arguments = [args],
-            inputs = depset(
-                direct = direct_inputs,
-                transitive = _transitive(library_dep_srcs) + [sdk_files],
-            ),
-            outputs = outputs,
-            mnemonic = "DartCodegen",
-            exec_group = PORTABLE,
-            progress_message = "DartCodegen %s" % ctx.label,
-            execution_requirements = PATH_MAPPING | {
-                "supports-workers": "1",
-                "requires-worker-protocol": "proto",
-                # The worker key includes the shim binary path; using the
-                # same mnemonic across builders still yields distinct worker
-                # pools because Bazel keys on `(mnemonic, binary)`.
-                "worker-key-mnemonic": "DartCodegen",
-            },
-        )
-    else:
-        # Run generator as a Dart script via the SDK's dart executable.
-        args.add(ctx.file.generator)
-        args.add("--input", src)
-        args.add("--input-asset", asset_path_for(src, lib_root))
-        for output in outputs:
-            args.add("--output", output)
-        direct_inputs.extend(add_shim_contract_args(
-            args,
-            ctx,
-            synth_pc,
-            dart,
-            auto_stage_srcs = auto_staged,
-            asset_deps = ctx.files.asset_deps,
-            lib_root = lib_root,
-        ))
-        args.add_all(ctx.attr.generator_args)
-        direct_inputs.append(ctx.file.generator)
-
-        ctx.actions.run(
-            executable = dart,
-            arguments = [args],
-            inputs = depset(
-                direct = direct_inputs,
-                transitive = _transitive(library_dep_srcs) + [sdk_files],
-            ),
-            outputs = outputs,
-            mnemonic = "DartCodegen",
-            exec_group = PORTABLE,
-            progress_message = "DartCodegen %s" % ctx.label,
-            execution_requirements = PATH_MAPPING,
-        )
+    ctx.actions.run(
+        executable = ctx.executable.generator,
+        arguments = [args],
+        inputs = depset(
+            direct = direct_inputs,
+            transitive = _transitive(inputs.package_files) + [sdk_files],
+        ),
+        outputs = outputs,
+        mnemonic = "DartCodegen",
+        exec_group = PORTABLE,
+        progress_message = "DartCodegen %s" % ctx.label,
+        execution_requirements = PATH_MAPPING | {
+            "supports-workers": "1",
+            "requires-worker-protocol": "proto",
+            # The worker key includes the generator's path; using the
+            # same mnemonic across builders still yields distinct worker
+            # pools because Bazel keys on `(mnemonic, binary)`.
+            "worker-key-mnemonic": "DartCodegen",
+        },
+    )
 
     return [
         DefaultInfo(files = depset(outputs)),
-        # The *effective* values, built-in default included: a library stating
-        # 3.11 over a generator that silently fell back to 3.0 is exactly the
+        # The *effective* values, the SDK's version included: a library stating
+        # an older one over a generator that states none is exactly the
         # disagreement `codegen_identity_error` exists to name.
-        DartPackageMetadataInfo(
-            package_name = identity.package_name,
-            language_version = (
-                identity.language_version or DEFAULT_ROOT_LANGUAGE_VERSION
-            ),
-        ),
-    ]
+        codegen_identity(identity),
+    ] + ([inputs.validation] if inputs.validation else [])
 
 def _transitive(d):
     """Wraps an optional depset as a single-element list for `depset(transitive=...)`.
@@ -254,6 +189,10 @@ def _transitive(d):
 
 dart_codegen = rule(
     implementation = _dart_codegen_impl,
+    # Its outputs are the same under every web compiler, whether or not
+    # creation locations are tracked and whatever environment the executable
+    # above it compiles in: built once, with none of them.
+    cfg = non_dart_transition,
     attrs = {
         "src": attr.label(
             doc = "The single `.dart` input file to process. Use one " +
@@ -262,48 +201,33 @@ dart_codegen = rule(
             allow_single_file = [".dart"],
         ),
         "generator": attr.label(
-            doc = "A `.dart` script to run as the code generator. " +
-                  "Mutually exclusive with `generator_bin`.",
-            allow_single_file = [".dart"],
-        ),
-        "generator_bin": attr.label(
-            doc = "A pre-compiled generator executable matching the " +
-                  "rules_dart shim CLI contract. Mutually exclusive with " +
-                  "`generator`.",
+            doc = "The generator: an executable speaking the rules_dart " +
+                  "shim contract, persistent-worker protocol included, " +
+                  "such as a `dart_binary` whose `main` calls `shimMain` " +
+                  "from `package:rules_dart_ext/worker_entry.dart` with a " +
+                  "`package:build` Builder. Built for the execution platform.",
+            mandatory = True,
             executable = True,
             cfg = config.exec(PORTABLE),
+            aspects = [codegen_sdk_summary_aspect],
         ),
         "output_suffixes": attr.string_list(
             doc = "One or more suffixes appended to the input stem to " +
                   "derive output file paths. E.g. `['.g.dart']` for a " +
-                  "SharedPart combining output; `['.config.dart', " +
-                  "'.module.dart']` for a builder that " +
-                  "emits both per input. At least one suffix is required.",
+                  "SharedPart combining output; `['.dart.drift_module.json', " +
+                  "'.dart.types.temp.dart']` for a builder that " +
+                  "emits both per input (drift's analyzer). At least one " +
+                  "suffix is required.",
             mandatory = True,
-        ),
-        "package_name": attr.string(
-            doc = "Dart package name owning `src`. Must match the " +
-                  "consuming `dart_library`'s `package_name` — enforced " +
-                  "where the two meet, in that library's `srcs`. Passed as " +
-                  "`--package`. Set this or `package`, not both; `package` " +
-                  "is how one declaration serves every rule building the " +
-                  "package, including rules in other BUILD files.",
-        ),
-        "language_version": attr.string(
-            doc = "Dart language version of the consuming package, in " +
-                  "`<major>.<minor>` form (e.g. `3.11`). When empty, " +
-                  "defers to a built-in safe default — set explicitly " +
-                  "only when pinning to a specific language-version " +
-                  "behaviour.",
         ),
         "deps": attr.label_list(
             doc = "`dart_library`-shaped targets (anything exporting " +
                   "`DartInfo`) whose transitive sources populate a " +
                   "synthesised `package_config.json` for the shim's " +
-                  "analyzer. Any file belonging to the same Dart package " +
-                  "as `src` is also auto-staged as `--dep` so the " +
-                  "Resolver can walk siblings.",
-            providers = [DartInfo],
+                  "analyzer. Any of their files under the `lib/` of " +
+                  "`src`'s Dart package is also auto-staged as `--dep` so " +
+                  "the Resolver can walk siblings." + CODEGEN_MEMBER_DEPS_DOC,
+            providers = CODEGEN_DEP_PROVIDERS,
         ),
         "parts": attr.label_list(
             doc = "Additional input files passed as `--part <path>` " +
@@ -334,17 +258,21 @@ dart_codegen = rule(
             allow_files = True,
         ),
         "asset_deps": attr.label_list(
-            doc = "Non-Dart files the Builder's `Resolver` / `findAssets` " +
-                  "must see (e.g. `.drift` schemas, `.drift_prep.json` " +
+            doc = "Files the Builder's `Resolver` / `findAssets` must " +
+                  "see that no library in `deps` holds: non-Dart files " +
+                  "(e.g. `.drift` schemas, `.drift_prep.json` " +
                   "sidecars, `.yaml` configs read via `BuildStep`). Each " +
                   "file is staged as an action input and passed as " +
-                  "`--dep <exec>|<asset>` using `asset_path_for`. For " +
-                  "Dart libraries, use `deps`. For files that only need " +
+                  "`--dep <exec>|<asset>` using `asset_path_for`. Dart " +
+                  "sources of the package that no library can hold yet " +
+                  "go here too: a macro's other sources, or an earlier " +
+                  "stage's output, before the parts generated for them " +
+                  "exist. For Dart libraries, use `deps`. For files that only need " +
                   "to exist on disk for a subprocess / runfile (not read " +
                   "through `package:build`), use `data`.",
             allow_files = True,
         ),
-    } | PACKAGE_IDENTITY_ATTRS,
+    } | package_identity_attrs() | CODEGEN_DEPS_ATTRS,
     exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs a per-file Dart code generator, producing one or more " +
           "sibling outputs per input.",

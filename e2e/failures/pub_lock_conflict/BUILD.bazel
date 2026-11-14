@@ -1,0 +1,14 @@
+load("@rules_dart//dart:defs.bzl", "dart_binary")
+
+# This workspace should FAIL to build: the root sets
+# `pub.settings(check_direct_dependencies = "error")`, and two of its requests
+# are raised (MODULE.bazel). Once both commands the error gives have run, it
+# builds.
+dart_binary(
+    name = "app",
+    main = "main.dart",
+    deps = [
+        "@deps_a//:path",
+        "@deps_b//:collection",
+    ],
+)

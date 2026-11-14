@@ -1,7 +1,7 @@
 """Code generation from non-Dart input files (drift `.drift` / `.moor`).
 
 Mirrors `dart_codegen` in shape but accepts any file extension on `src`.
-Same shim-contract attrs (`package_name`, `deps`, `parts`, `config`,
+Same shim-contract attrs (`package`, `deps`, `parts`, `config`,
 `package_config`, `generator_args`); same per-file behaviour — one input,
 one or more outputs derived by applying each `output_suffixes` entry.
 
@@ -15,51 +15,45 @@ Usage:
     dart_sqlcodegen(
         name = "schema_prep",
         src = "schema.drift",
-        generator_bin = "@rules_dart//dart/ext/drift:shim_prep",
+        generator = "@rules_dart//dart/ext/drift:shim_prep",
         output_suffixes = [".drift_prep.json"],
-        package_name = "my_app",
+        package = ":pubspec-metadata",
         deps = ["@pub_deps//:drift"],
     )
 """
 
-load("//dart:providers.bzl", "DartInfo", "DartPackageMetadataInfo")
+load(
+    "//dart/private:codegen_deps.bzl",
+    "CODEGEN_DEPS_ATTRS",
+    "CODEGEN_DEP_PROVIDERS",
+    "CODEGEN_MEMBER_DEPS_DOC",
+    "codegen_deps",
+)
+load("//dart/private:codegen_sdk_summary.bzl", "codegen_sdk_args", "codegen_sdk_summary_aspect")
 load(
     "//dart/private:common.bzl",
-    "DEFAULT_ROOT_LANGUAGE_VERSION",
-    "PACKAGE_IDENTITY_ATTRS",
     "PATH_MAPPING",
     "add_shim_contract_args",
     "asset_path_for",
-    "dart_lib_root_for_package",
+    "codegen_identity",
+    "package_identity_attrs",
     "resolve_package_identity",
-    "same_package_library_dep_files",
-    "synth_package_config",
 )
-load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
+load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS")
+load("//dart/private:runtime.bzl", "non_dart_transition")
+
+visibility("//dart/...")
 
 def _dart_sqlcodegen_impl(ctx):
     identity = resolve_package_identity(ctx)
-    sdk = portable_sdk(ctx)
-    sdk_files = sdk.tool_files
 
     if not ctx.attr.output_suffixes:
         fail("%s: `output_suffixes` must contain at least one suffix." %
              ctx.label)
 
     src = ctx.file.src
-    synth_pc, lib_dep_srcs = synth_package_config(ctx, ctx.attr.deps)
-
-    lib_root_from_deps = dart_lib_root_for_package(
-        ctx.attr.deps,
-        identity.package_name,
-    )
-    lib_root = lib_root_from_deps if lib_root_from_deps != None else ctx.label.package
-
-    auto_staged, _ = same_package_library_dep_files(
-        ctx.attr.deps,
-        identity.package_name,
-        exclude_paths = [src.path],
-    )
+    inputs = codegen_deps(ctx, identity, exclude_paths = [src.path])
+    package_root = inputs.package_root
 
     # Strip the source's actual extension (may be `.drift`, `.moor`, …) and
     # append each output_suffix; place outputs next to the source.
@@ -84,7 +78,7 @@ def _dart_sqlcodegen_impl(ctx):
     args.use_param_file("@%s", use_always = True)
     args.set_param_file_format("multiline")
     args.add("--input", src)
-    args.add("--input-asset", asset_path_for(src, lib_root))
+    args.add("--input-asset", asset_path_for(src, package_root))
     for output in outputs:
         args.add("--output", output)
 
@@ -92,18 +86,16 @@ def _dart_sqlcodegen_impl(ctx):
     direct.extend(add_shim_contract_args(
         args,
         ctx,
-        synth_pc,
-        sdk.dart,
-        auto_stage_srcs = auto_staged,
+        inputs,
         asset_deps = ctx.files.asset_deps,
-        lib_root = lib_root,
     ))
+    sdk_files = codegen_sdk_args(args, ctx, inputs.packages)
     args.add_all(ctx.attr.generator_args)
 
-    transitive = ([lib_dep_srcs] if lib_dep_srcs != None else []) + [sdk_files]
+    transitive = ([inputs.package_files] if inputs.package_files != None else []) + [sdk_files]
 
     ctx.actions.run(
-        executable = ctx.executable.generator_bin,
+        executable = ctx.executable.generator,
         arguments = [args],
         inputs = depset(direct = direct, transitive = transitive),
         outputs = outputs,
@@ -119,30 +111,32 @@ def _dart_sqlcodegen_impl(ctx):
 
     return [
         DefaultInfo(files = depset(outputs)),
-        # The *effective* values, built-in default included: a library stating
-        # 3.11 over a generator that silently fell back to 3.0 is exactly the
+        # The *effective* values, the SDK's version included: a library stating
+        # an older one over a generator that states none is exactly the
         # disagreement `codegen_identity_error` exists to name.
-        DartPackageMetadataInfo(
-            package_name = identity.package_name,
-            language_version = (
-                identity.language_version or DEFAULT_ROOT_LANGUAGE_VERSION
-            ),
-        ),
-    ]
+        codegen_identity(identity),
+    ] + ([inputs.validation] if inputs.validation else [])
 
 dart_sqlcodegen = rule(
     implementation = _dart_sqlcodegen_impl,
+    # Its outputs are the same under every web compiler, whether or not
+    # creation locations are tracked and whatever environment the executable
+    # above it compiles in: built once, with none of them.
+    cfg = non_dart_transition,
     attrs = {
         "src": attr.label(
             doc = "The single non-Dart input file (`.drift`, `.moor`, …).",
             mandatory = True,
             allow_single_file = True,
         ),
-        "generator_bin": attr.label(
-            doc = "Pre-compiled generator executable matching the " +
-                  "rules_dart shim CLI contract.",
+        "generator": attr.label(
+            doc = "The generator: an executable speaking the rules_dart " +
+                  "shim contract, persistent-worker protocol included " +
+                  "(see `dart_codegen.generator`). Built for the execution " +
+                  "platform.",
             executable = True,
             cfg = config.exec(PORTABLE),
+            aspects = [codegen_sdk_summary_aspect],
             mandatory = True,
         ),
         "output_suffixes": attr.string_list(
@@ -153,24 +147,12 @@ dart_sqlcodegen = rule(
                   "all suffixes here.",
             mandatory = True,
         ),
-        "package_name": attr.string(
-            doc = "Dart package name owning `src`. Must match the " +
-                  "consuming `dart_library`'s `package_name` — enforced " +
-                  "where the two meet, in that library's `srcs`. Set this " +
-                  "or `package`, not both; `package` is how one declaration " +
-                  "serves every rule building the package, including rules " +
-                  "in other BUILD files.",
-        ),
-        "language_version": attr.string(
-            doc = "Dart language version in `<major>.<minor>` form. " +
-                  "Empty falls back to a built-in default.",
-        ),
         "deps": attr.label_list(
             doc = "`dart_library`-shaped targets (anything exporting " +
                   "`DartInfo`) whose transitive sources populate a " +
                   "synthesised `package_config.json`. Same-package " +
-                  "siblings are auto-staged as `--dep`.",
-            providers = [DartInfo],
+                  "siblings are auto-staged as `--dep`." + CODEGEN_MEMBER_DEPS_DOC,
+            providers = CODEGEN_DEP_PROVIDERS,
         ),
         "parts": attr.label_list(
             doc = "Additional input files passed as `--part <path>`.",
@@ -200,7 +182,7 @@ dart_sqlcodegen = rule(
                   "passed as `--dep <exec>|<asset>` using `asset_path_for`.",
             allow_files = True,
         ),
-    } | PACKAGE_IDENTITY_ATTRS,
+    } | package_identity_attrs() | CODEGEN_DEPS_ATTRS,
     exec_groups = PORTABLE_EXEC_GROUPS,
     doc = "Runs a Dart code generator over a non-Dart input (`.drift`, " +
           "`.moor`, …), producing one or more sibling outputs.",

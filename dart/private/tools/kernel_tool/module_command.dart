@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'args.dart';
 import 'compile.dart';
+import 'declared_view.dart';
 import 'manifest.dart';
 import 'module_graph.dart';
 import 'sources.dart';
@@ -18,12 +19,15 @@ import 'uris.dart';
 ///
 /// [worker] is a compiler kept from an earlier run, if the caller has one (a
 /// Bazel worker); else one is started and stopped here. [digests] are those
-/// Bazel gave for the action's inputs. Messages go to [err].
+/// Bazel gave for the action's inputs. With [declaredInputs], the paths a work
+/// request declares, the compiler finds sources only among those
+/// (`declared_view.dart`); a sandbox needs no such list. Messages go to [err].
 Future<int> runModule(
   Args args, {
   required StringSink err,
   KernelWorker? worker,
   Map<String, List<int>> digests = const {},
+  List<String>? declaredInputs,
 }) async {
   final label = args.one('label');
   final outputDir = args.one('output-dir');
@@ -53,8 +57,7 @@ Future<int> runModule(
   final planned = planModules(libraries: libraries, supported: supported);
   final manifest = Manifest(
     label: label,
-    package: args.optional('package-name'),
-    libRoot: args.optional('lib-root'),
+    packages: ownPackages(args),
     dir: outputDir,
     modules: [
       for (var i = 0; i < planned.length; i++)
@@ -72,13 +75,23 @@ Future<int> runModule(
   final index = ModuleIndex(deps, own: manifest);
   final digested = Digests(digests);
   final shared = worker != null;
-  // The module being compiled, for a compile that never ends.
-  var compiling = const <String>[];
+  // The dependencies' kernel files the modules were compiled against, which
+  // the outlines refer to.
+  final read = <String>{};
+  final view = declaredInputs == null
+      ? null
+      : DeclaredView.stage(
+          paths: [configPath, ...args.all('src')],
+          declared: declaredInputs,
+          roots: roots,
+        );
+  final compilerRoots = view == null
+      ? roots
+      : [for (final root in roots) rootArgument(view.of(root))];
   try {
-    // Whether the compiler's state is one it can build on: only a compile
-    // that succeeded leaves one. After a compile that reused the state and
-    // failed, `kernel_worker` can take the next compile that reuses it and
-    // never answer.
+    // Whether the compiler holds state the next module can build on, which
+    // only a compile that succeeded leaves. Asked to reuse what a failed
+    // compile left, `kernel_worker` can take the next request and never answer.
     var reusable = false;
     for (var i = 0; i < planned.length; i++) {
       final plan = planned[i];
@@ -94,8 +107,11 @@ Future<int> runModule(
 
       final output = '$outputDir/$i.dill';
       final summaries = [for (final m in reach.order) m.dillPath!];
+      read.addAll([
+        for (final m in reach.order)
+          if (m.manifest != manifest) m.dillPath!,
+      ]);
       final sources = [...plan.libraries, ...plan.parts];
-      compiling = sources;
       worker ??= KernelWorker(args.one('runtime'), args.one('snapshot'));
       final result = await worker.compile(
         [
@@ -104,9 +120,11 @@ Future<int> runModule(
           '--dart-sdk-summary',
           args.one('platform'),
           for (final d in args.all('define')) '-D$d',
+          if (args.flag('track-creation-locations'))
+            '--track-creation-locations',
           '--multi-root-scheme',
           rootScheme,
-          for (final root in roots) ...['--multi-root', root],
+          for (final root in compilerRoots) ...['--multi-root', root],
           '--packages-file',
           rootUri(configRelative),
           '--no-summary-only',
@@ -145,24 +163,85 @@ Future<int> runModule(
           ..reason = 'does not compile\n${_diagnostics(result.output)}';
       }
     }
-  } on CompilerStalled catch (e) {
-    err.writeln('kernel_tool: $label: $e compiling ${compiling.join(', ')}');
-    return 1;
   } finally {
     if (!shared) await worker?.close();
+    view?.delete();
   }
 
+  if (args.optional('outline-tool') case final tool?) {
+    final outlined = await _outline(tool, args, manifest, read);
+    if (outlined != null) {
+      err.writeln('$label: $outlined');
+      return 1;
+    }
+  }
   File(args.one('manifest-output')).writeAsStringSync(manifest.toJson());
   return 0;
 }
 
-/// Whether [plan] is unusable without compiling it, and why: it imports a
-/// `dart:` library the platform lacks, or it needs a module that is not ok. Null when it can be compiled.
+/// Writes the outline of each of [manifest]'s modules that compiled to
+/// `--outline-dir`, under the same name, with `--outline-tool`: what
+/// dependents compile against. [read] are the dependencies' kernel files the
+/// modules were compiled against. Returns the tool's complaint, if it has one.
+Future<String?> _outline(
+  String tool,
+  Args args,
+  Manifest manifest,
+  Set<String> read,
+) async {
+  final outlineDir = args.one('outline-dir');
+  Directory(outlineDir).createSync(recursive: true);
+  final compiled = [for (final m in manifest.modules) ?m.dill];
+  if (compiled.isEmpty) return null;
+  // Every dependency's kernel file is named, more than a Windows command line
+  // holds for a package with many, so they go in a params file.
+  final scratch = Directory.systemTemp.createTempSync('kernel_outline');
+  try {
+    final params = File('${scratch.path}/params')
+      ..writeAsStringSync(
+        [
+          for (final dill in [args.one('platform'), ...read]) ...[
+            '--load',
+            dill,
+          ],
+          for (final dill in compiled) ...[
+            '--module',
+            '${manifest.dir}/$dill',
+            '--outline',
+            '$outlineDir/$dill',
+          ],
+        ].map((line) => '$line\n').join(),
+      );
+    final result = await Process.run(File(tool).absolute.path, [
+      '@${params.path}',
+    ]);
+    if (result.exitCode == 0) return null;
+    return '${result.stdout}${result.stderr}'.trimRight();
+  } finally {
+    scratch.deleteSync(recursive: true);
+  }
+}
+
+/// Whether [plan] is unusable without compiling it, and why: it names a
+/// `file:` URI, imports a `dart:` library the platform lacks, or needs a
+/// module that is not ok. Null when it can be compiled.
 ({String status, String reason})? moduleVerdict(
   PlannedModule plan,
   String target,
   ModuleReach reach,
 ) {
+  // The compiler reads a `file:` URI wherever the host has the file, so the
+  // module would depend on what the build never declared.
+  if (plan.fileUris.isNotEmpty) {
+    final one = plan.fileUris.length == 1;
+    return (
+      status: statusFailed,
+      reason:
+          'names ${plan.fileUris.join(', ')}, '
+          '${one ? 'a file: URI' : 'file: URIs'}, which the compiler would '
+          'read from outside the inputs the build declares',
+    );
+  }
   if (plan.unsupported.isNotEmpty) {
     return (
       status: statusUnsupported,

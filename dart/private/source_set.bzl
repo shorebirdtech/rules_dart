@@ -1,4 +1,4 @@
-"""`dart_source_set` and the shared source-assembly helper.
+"""The shared source-assembly helper.
 
 The Dart toolchain resolves a `part` directive by filesystem adjacency to its
 library, and a package's `package:` imports against a single `rootUri`. So a
@@ -16,9 +16,13 @@ same assembly as a standalone, package-agnostic primitive (consumed via
 """
 
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory_bin_action")
-load("//dart/private:dart_info.bzl", "derived_package_info", "package_lib_prefix")
+load("//dart/private:dart_info.bzl", "derived_package_info")
 
-COPY_TO_DIRECTORY_TOOLCHAINS = ["@bazel_lib//lib:copy_to_directory_toolchain_type"]
+visibility("//dart/...")
+
+# A `Label`, so a rule in another module that declares these toolchains finds
+# rules_dart's `bazel_lib` whether or not it depends on `bazel_lib` itself.
+COPY_TO_DIRECTORY_TOOLCHAINS = [Label("@bazel_lib//lib:copy_to_directory_toolchain_type")]
 
 def needs_source_assembly(srcs):
     """Whether `srcs` must be assembled into one directory before compilation.
@@ -75,9 +79,13 @@ def assemble_source_dir(ctx, name, srcs, root_paths = ["."], replace_prefixes = 
 def package_for(short_path, packages):
     """Returns the package_name owning `short_path` (see `package_record_for`).
 
+    Callers matching many files against one package list build the index once
+    (`package_record_index`) and call `package_record_for_index`: this wrapper
+    rebuilds it on every call.
+
     Args:
       short_path: A File's `short_path`.
-      packages: List of `DartPackageInfo` (read for `package_name` and `lib_root`).
+      packages: List of `DartPackageInfo` (read for `package_name` and `package_root`).
 
     Returns:
       The matching `package_name`, or `None` if no package owns the path.
@@ -86,18 +94,18 @@ def package_for(short_path, packages):
     return record.package_name if record != None else None
 
 def package_record_for(short_path, packages):
-    """Returns the package record owning `short_path`, by longest matching `lib_root`.
+    """Returns the package record owning `short_path`, by longest matching `package_root`.
 
-    A package owns its `<lib_root>/lib/` subtree and nothing else in the
+    A package owns its `<package_root>/lib/` subtree and nothing else in the
     directory: `lib/` is what a `package:` URI can reach, and staging strips
-    `lib_root`, so a `test/` or `tool/` file co-located into the package would
+    `package_root`, so a `test/` or `tool/` file co-located into the package would
     land somewhere no import resolves — and a generated entrypoint would lose
     the relative imports that resolved from its real location. The rule is the
-    same wherever the package sits. Among several matches the longest `lib_root`
+    same wherever the package sits. Among several matches the longest `package_root`
     wins; the root package's is empty, so it is taken only when nothing else
     matched at all.
 
-    The one path that is not under `lib/` is `lib_root` itself, which matches
+    The one path that is not under `lib/` is `package_root` itself, which matches
     exactly. That is a package whose files arrive as one opaque directory — a
     `dart_library(srcs_dir = ...)`, or a record `colocate_packages` already
     rewrote to its `.pkgsrcs` directory — where the directory *is* the package
@@ -105,38 +113,94 @@ def package_record_for(short_path, packages):
 
     Args:
       short_path: A File's `short_path`.
-      packages: List of `DartPackageInfo` (read for `package_name` and `lib_root`).
+      packages: List of `DartPackageInfo` (read for `package_name` and `package_root`).
 
     Returns:
       The matching record, or `None` if no package owns the path. A package
-      split across several `lib_root`s has a record per root, and the one
+      split across several `package_root`s has a record per root, and the one
       whose root holds the file is returned.
     """
-    best = None
-    best_len = -1
-    for p in packages:
-        lr = p.lib_root
-        prefix = package_lib_prefix(lr)
+    return package_record_for_index(short_path, package_record_index(packages))
 
-        # `<lib_root>/lib` — the library directory itself, not a file under it.
-        lib_dir = prefix[:-1]
-        under_lib = short_path == lib_dir or short_path.startswith(prefix)
-        if not lr:
-            # Root package: owns `lib/...` files. Lowest precedence.
-            if under_lib and best_len < 0:
-                best = p
-                best_len = 0
-        elif under_lib or short_path == lr:
-            if len(lr) > best_len:
-                best = p
-                best_len = len(lr)
-    return best
+def package_record_index(packages):
+    """Indexes package records by `package_root`, for `package_record_for_index`.
+
+    Where several records share a `package_root`, the first keeps it, as the scan
+    in list order always decided.
+
+    Args:
+      packages: List of `DartPackageInfo` (read for `package_root`).
+
+    Returns:
+      Dict of `package_root` to the first record with it.
+    """
+    index = {}
+    for p in packages:
+        if p.package_root not in index:
+            index[p.package_root] = p
+    return index
+
+def package_index(packages):
+    """Indexes packages by `package_root`, for `package_for_index`.
+
+    Args:
+      packages: List of `DartPackageInfo` (read for `package_name` and `package_root`).
+
+    Returns:
+      Dict of `package_root` to the first record with it.
+    """
+    return package_record_index(packages)
+
+def package_for_index(short_path, index):
+    """`package_for` against an index from `package_index`.
+
+    Args:
+      short_path: A File's `short_path`.
+      index: Dict from `package_index`.
+
+    Returns:
+      The matching `package_name`, or `None` if no package owns the path.
+    """
+    record = package_record_for_index(short_path, index)
+    return record.package_name if record != None else None
+
+def package_record_for_index(short_path, index):
+    """`package_record_for` against an index from `package_record_index`.
+
+    The only `package_root`s that can own a path are the path itself (an opaque
+    package directory) and each prefix that ends just before a `lib` component
+    of it. Trying those longest first and taking the first that names a record
+    is the longest-match rule in time proportional to the path's depth, not to
+    the number of packages: a target matches every file of its closure, so the
+    scan cost files x packages.
+
+    Args:
+      short_path: A File's `short_path`.
+      index: Dict of `package_root` to record, from `package_record_index`.
+
+    Returns:
+      The matching record, or `None` if no package owns the path.
+    """
+
+    # The path itself is longer than any prefix of it. The root package's
+    # empty `package_root` owns only its `lib/`, never a path by equality.
+    if short_path:
+        record = index.get(short_path)
+        if record != None:
+            return record
+    parts = short_path.split("/")
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] == "lib":
+            record = index.get("/".join(parts[:i]))
+            if record != None:
+                return record
+    return None
 
 def colocate_packages(ctx, packages, all_srcs, members = {}):
     """Co-locates each package's split source/generated files into one directory.
 
     Groups `all_srcs` by the package whose `lib/` they belong to (longest
-    `lib_root` match — see `package_for`).
+    `package_root` match — see `package_for`).
     Any package with at least one generated file (and not already a single
     pre-assembled directory) is assembled into one tree-artifact directory, so it
     has a single real `rootUri` at compile time. This is what makes a package
@@ -154,14 +218,15 @@ def colocate_packages(ctx, packages, all_srcs, members = {}):
         inside its root, where its `languageVersion` applies.
 
     Returns:
-      `(packages2, srcs2)` — packages with each assembled package's `lib_root`
+      `(packages2, srcs2)` — packages with each assembled package's `package_root`
       rewritten to its assembled directory, and the matching File list (assembled
       directories plus untouched files) to feed the compile action.
     """
     by_pkg = {}
     loose = []
+    index = package_index(packages)
     for f in all_srcs:
-        name = package_for(f.short_path, packages)
+        name = package_for_index(f.short_path, index)
         if name == None:
             loose.append(f)
         elif name in by_pkg:
@@ -187,50 +252,17 @@ def colocate_packages(ctx, packages, all_srcs, members = {}):
                 ctx,
                 ctx.label.name + "." + mangled + ".pkgsrcs",
                 files,
-                root_paths = [p.lib_root] if p.lib_root else ["."],
+                root_paths = [p.package_root] if p.package_root else ["."],
             )
 
-            # Only `lib_root` changes. Everything else the record carries —
+            # Only `package_root` changes. Everything else the record carries —
             # its language version, the code assets the package owns — is as
             # true of the assembled copy as of the original, and is carried
             # through rather than re-listed here.
-            packages2.append(derived_package_info(p, lib_root = assembled.short_path))
+            packages2.append(derived_package_info(p, package_root = assembled.short_path))
             srcs2.append(assembled)
         else:
             packages2.append(p)
             for f in files:
                 srcs2.append(f)
     return packages2, srcs2
-
-def _dart_source_set_impl(ctx):
-    dst = assemble_source_dir(
-        ctx,
-        name = ctx.label.name,
-        srcs = ctx.files.srcs,
-        root_paths = ctx.attr.root_paths,
-        replace_prefixes = ctx.attr.replace_prefixes,
-    )
-    return [DefaultInfo(
-        files = depset([dst]),
-        runfiles = ctx.runfiles(files = [dst]),
-    )]
-
-dart_source_set = rule(
-    implementation = _dart_source_set_impl,
-    attrs = {
-        "srcs": attr.label_list(
-            doc = "Dart files (source and/or generated, from any target) to assemble into one directory.",
-            allow_files = True,
-            mandatory = True,
-        ),
-        "root_paths": attr.string_list(
-            doc = "Paths treated as roots in the output directory (stripped). `\".\"` is this target's Bazel package. Set additional roots to flatten files from other packages.",
-            default = ["."],
-        ),
-        "replace_prefixes": attr.string_dict(
-            doc = "Map of output-path prefixes to rewrite, applied after `root_paths` stripping. Use to place cross-package inputs under `lib/`.",
-        ),
-    },
-    toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
-    doc = "Assembles Dart sources (hand-written + generated) into one tree-artifact directory. Package-agnostic; consume via `dart_library`'s `srcs_dir`.",
-)

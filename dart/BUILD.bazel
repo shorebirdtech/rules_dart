@@ -1,15 +1,58 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("//dart/private:build_settings.bzl", "dart_defines_flag")
 load("//dart/private:dart_sdk_binary.bzl", "dart_sdk_binary")
 load("//dart/private:resolved_toolchain.bzl", "resolved_toolchain")
+load("//tool:starlark_docs.bzl", "starlark_docs_test")
+
+# The public .bzl files' `bzl_library` targets also extract their API docs
+# (`starlark_doc_extract`), which the release attaches and `:docs_test`
+# checks. Test packages below keep skylib's, which extracts none.
+# gazelle:map_kind bzl_library bzl_library @bazel_lib//:bzl_library.bzl
 
 # Dart environment declarations folded into every Dart compile, after any
 # target-level `defines`. Repeatable — one define per occurrence:
 #   bazel build //app --@rules_dart//dart:extra_dart_defines=FOO=bar
+# They describe the app: `scope = "target"` keeps them out of the exec
+# configuration, so build tools are compiled without them, and a new value
+# does not rebuild the tools.
 dart_defines_flag(
     name = "extra_dart_defines",
     build_setting_default = [],
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Whether every Dart kernel compile for the VM runs the front end's
+# creation-location transform (`--track-creation-locations`, also known as
+# `--track-widget-creation`): a class that is tracked (Flutter's `Widget`, or
+# any annotated `@pragma('track-creation-locations')`) takes a hidden location
+# argument in its constructors, and each call site passes where it is. The
+# setting has to be the same for every library of a program and its entrypoint,
+# and one flag is what guarantees that. Off (the default), no argument is passed.
+# `scope = "target"` keeps build tools, which compile in the exec configuration,
+# out of it. Not for `dart2js` or `dart2wasm`.
+#   bazel test //... --@rules_dart//dart:track_creation_locations
+bool_flag(
+    name = "track_creation_locations",
+    build_setting_default = False,
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Whether a `dart_binary` in the `exe` or `aot-snapshot` mode leaves its
+# debugging information out of the executable and writes it to
+# `<name>.symbols`, in the `debug_info` output group, as
+# `dart compile --save-debugging-info` and `flutter build --split-debug-info`
+# do. Its stack traces then print as addresses, which the symbols file
+# translates back (`package:native_stack_traces`, `flutter symbolize`). A
+# `kernel` has no debugging information to split. `scope = "target"` keeps the
+# build's own tools out of it.
+#   bazel build //app --@rules_dart//dart:split_debug_info --output_groups=+debug_info
+bool_flag(
+    name = "split_debug_info",
+    build_setting_default = False,
+    scope = "target",
     visibility = ["//visibility:public"],
 )
 
@@ -17,22 +60,105 @@ dart_defines_flag(
 # the ones a test reaches (the default), or compiles every test's whole program
 # from source. Turned off build-wide only, as an escape hatch:
 #   bazel test //... --@rules_dart//dart:modular_kernel=false
-# Off, a library's imports are no longer checked against its own `deps`.
+# Import checks do not depend on it: a library checks its own imports either way.
 bool_flag(
     name = "modular_kernel",
     build_setting_default = True,
     visibility = ["//visibility:public"],
 )
 
-# A workaround: on macOS the analysis server behind `dart analyze` and
-# `dart fix` was seen to hang forever in its shutdown, holding up the build.
-# Off (the default), the `dart_analyze` aspect's actions run the plain
-# commands, so a hang shows as a stuck action; on, they talk to the server
-# themselves and stop it when it will not shut down:
-#   bazel test //... --@rules_dart//dart:analysis_shutdown_workaround=true
+# Whether, under `modular_kernel`, a test's program is a kernel list (the
+# default): a text file naming the kernels the test reaches, which the VM reads
+# as one program, so the test stores no copy of them. Off, every test's program
+# is one joined `.dill`. rules_flutter reads it for its widget tests too:
+#   bazel test //... --@rules_dart//dart:kernel_list=false
 bool_flag(
-    name = "analysis_shutdown_workaround",
+    name = "kernel_list",
+    build_setting_default = True,
+    # No build tool reads it: `scope = "target"` keeps it from reconfiguring them.
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Whether a `dart_test` under `package:test` starts the runner from an app-JIT
+# snapshot cached per machine, which the first test to find none trains. The
+# snapshot is never a Bazel input or output: training is not byte-reproducible,
+# and the cache can change only how fast the runner starts. Off by default: a
+# remote executor may have no writable shared directory, or a fresh one for
+# each action. Off, the runner starts from its kernel and no cache is touched.
+# For local test runs:
+#   common --@rules_dart//dart:runner_snapshot
+bool_flag(
+    name = "runner_snapshot",
     build_setting_default = False,
+    # No build tool reads it: `scope = "target"` keeps it from reconfiguring them.
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Whether, under `modular_kernel`, a library's dependents compile against its
+# modules' outlines (their kernel without function bodies) rather than the full
+# kernel. On (the default), an edit inside a function body recompiles only the
+# library's own modules: its dependents' compiles read the same outline, and
+# Bazel reuses them. A library declaring a mixin, or written before Dart 3.0,
+# keeps its source positions in its outline, so an edit there that moves code
+# recompiles its dependents too. Off, they compile against full kernels:
+#   bazel test //... --@rules_dart//dart:outline_kernel=false
+# The outlines are made with the `pkg/kernel` of the SDK that compiled the
+# modules: the outline toolchain (`:outline_toolchain_type`) of the Dart SDK.
+bool_flag(
+    name = "outline_kernel",
+    build_setting_default = True,
+    visibility = ["//visibility:public"],
+)
+
+# On when `outline_kernel` is: a kernel SDK selects its outline tool on it,
+# so that with the flag off the tool, and the SDK source it is built from, are
+# not fetched.
+config_setting(
+    name = "is_outline_kernel",
+    flag_values = {":outline_kernel": "true"},
+    visibility = ["//visibility:public"],
+)
+
+# On (the default), analysis runs in persistent workers: the summary
+# analyzer's (summary and analyze actions, under `analysis_summaries`) and the
+# analysis server's (`dart fix`, and analysis with summaries off), each server
+# kept for the requests of a build. Off, every action starts a fresh process:
+#   bazel test //... --@rules_dart//dart:analysis_worker=false
+bool_flag(
+    name = "analysis_worker",
+    build_setting_default = True,
+    # No build tool reads it: `scope = "target"` keeps it from reconfiguring them.
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# On (the default), the `dart_analyze` aspect analyzes each target against
+# analyzer summaries of its dependencies rather than their source, so an edit
+# that changes no declaration (a function body) re-analyzes only its own
+# target. Every dependency library gets a summary action of its own. The
+# summaries are read by an analyzer rules_dart builds on the SDK's own
+# `pkg/analyzer` and `pkg/linter`, unmodified (the analyzer toolchain,
+# `:analyzer_toolchain_type`), because no SDK tool reads them. The README's
+# "Analysis against summaries" says what it cannot do. Off, every target is
+# analyzed with its dependencies' source, by the SDK's own `dart analyze`:
+#   bazel test //... --@rules_dart//dart:analysis_summaries=false
+# It keeps Bazel's default scope, as `outline_kernel` does: the summary
+# analyzer is resolved in the exec configuration of the analysis actions, and
+# with the flag off its SDK source must not be fetched there either.
+bool_flag(
+    name = "analysis_summaries",
+    build_setting_default = True,
+    visibility = ["//visibility:public"],
+)
+
+# On when `analysis_summaries` is: the analyzer toolchain selects its tool on
+# it, so that with the flag off the tool, and the SDK source it is built from,
+# are not fetched.
+config_setting(
+    name = "is_analysis_summaries",
+    flag_values = {":analysis_summaries": "true"},
     visibility = ["//visibility:public"],
 )
 
@@ -56,6 +182,22 @@ toolchain_type(
     visibility = ["//visibility:public"],
 )
 
+# The outline stripper of a Dart SDK, for `outline_kernel`: a
+# `dart_outline_toolchain`, built on that SDK's own `pkg/kernel`. The `dart`
+# extension registers one with each Dart toolchain.
+toolchain_type(
+    name = "outline_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
+# The summary analyzer of a Dart SDK, for `analysis_summaries`: a
+# `dart_analyzer_toolchain`, built on that SDK's own `pkg/analyzer` and
+# `pkg/linter`. The `dart` extension registers one with each Dart toolchain.
+toolchain_type(
+    name = "analyzer_toolchain_type",
+    visibility = ["//visibility:public"],
+)
+
 resolved_toolchain(
     name = "resolved_toolchain",
     # Marked manual so that `bazel test //...` passes
@@ -73,13 +215,27 @@ dart_sdk_binary(
     visibility = ["//visibility:public"],
 )
 
+# Converts line coverage a Dart VM reported, as `package:coverage` writes it, to
+# the LCOV tracefile Bazel's coverage runner merges, naming files by their
+# workspace path. For a test rule that collects coverage from a VM of its own;
+# its command line is stable. See "Coverage" in the README, and
+# `test_coverage` in `utils.bzl`.
+alias(
+    name = "coverage_converter",
+    actual = "//dart/private/tools:coverage_converter",
+    visibility = ["//visibility:public"],
+)
+
 bzl_library(
     name = "repositories",
     srcs = ["repositories.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "//dart/private:dart_package_metadata",
+        "//dart/private:purl",
         "//dart/private:toolchains_repo",
         "//dart/private:versions",
+        "//dart/pub:pubspec",
     ],
 )
 
@@ -88,18 +244,24 @@ bzl_library(
     srcs = ["defs.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        ":providers",
         "//dart/private:dart_aggregate_codegen",
         "//dart/private:dart_analysis_options",
         "//dart/private:dart_analysis_test",
         "//dart/private:dart_analyze_aspect",
         "//dart/private:dart_binary",
+        "//dart/private:dart_code_asset",
         "//dart/private:dart_codegen",
-        "//dart/private:dart_fix",
-        "//dart/private:dart_format",
+        "//dart/private:dart_data_asset",
         "//dart/private:dart_library",
-        "//dart/private:dart_link_hook",
+        "//dart/private:dart_linked_code_asset",
+        "//dart/private:dart_package_cycle",
+        "//dart/private:dart_package_metadata",
+        "//dart/private:dart_sqlcodegen",
         "//dart/private:dart_test",
         "//dart/private:dart_web_application",
+        "//dart/private:program_assets",
+        "//dart/private:source_set",
     ],
 )
 
@@ -114,12 +276,6 @@ bzl_library(
 )
 
 bzl_library(
-    name = "providers",
-    srcs = ["providers.bzl"],
-    visibility = ["//visibility:public"],
-)
-
-bzl_library(
     name = "toolchain",
     srcs = ["toolchain.bzl"],
     visibility = ["//visibility:public"],
@@ -131,20 +287,34 @@ bzl_library(
     srcs = ["utils.bzl"],
     visibility = ["//visibility:public"],
     deps = [
+        "//dart/private:build_settings",
         "//dart/private:common",
+        "//dart/private:dart_compile",
+        "//dart/private:dart_coverage",
+        "//dart/private:dart_data_asset",
+        "//dart/private:dart_deps",
+        "//dart/private:dart_import_check",
         "//dart/private:dart_info",
         "//dart/private:dart_library",
+        "//dart/private:dart_module",
+        "//dart/private:dart_package_metadata",
+        "//dart/private:dart_summary",
         "//dart/private:exec_groups",
+        "//dart/private:package_root",
+        "//dart/private:program_assets",
+        "//dart/private:runtime",
         "//dart/private:source_set",
     ],
 )
 
-# The `dart_analysis_config` whose options the `dart_analyze` aspect, `dart_fix`
-# and `dart_format` use. The default lists none: every file gets the SDK's
-# defaults.
+# The `dart_analysis_config` whose options the `dart_analyze` aspect uses, for
+# its checks and for what `@rules_dart//dart/format` and `@rules_dart//dart/fix`
+# write. The default lists none: every file gets the SDK's defaults.
 label_flag(
     name = "analysis_config",
     build_setting_default = "//dart/private:empty_analysis_config",
+    # No build tool reads it: `scope = "target"` keeps it from reconfiguring them.
+    scope = "target",
     visibility = ["//visibility:public"],
 )
 
@@ -153,4 +323,14 @@ bzl_library(
     srcs = ["analyze.bzl"],
     visibility = ["//visibility:public"],
     deps = ["//dart/private:dart_analyze_aspect"],
+)
+
+# Every public symbol of this package's .bzl files is documented.
+starlark_docs_test(name = "docs_test")
+
+bzl_library(
+    name = "providers",
+    srcs = ["providers.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart/private:package_info"],
 )

@@ -1,11 +1,13 @@
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
 load("//dart:defs.bzl", "dart_binary")
+load("//tool:starlark_docs.bzl", "starlark_docs_test")
 
 # Shim binary for the built_value Builder. SharedPartBuilder; produces
 # .built_value.g.part shards.
 dart_binary(
     name = "shim",
     srcs = ["shim.dart"],
-    code_assets_from_deps = False,
+    code_assets_from_packages = False,
     main = "shim.dart",
     visibility = ["//visibility:public"],
     deps = [
@@ -13,3 +15,13 @@ dart_binary(
         "@ext_pub_deps//:built_value_generator",
     ],
 )
+
+bzl_library(
+    name = "defs",
+    srcs = ["defs.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@rules_dart//dart/ext:defs"],
+)
+
+# Every public symbol of this package's .bzl files is documented.
+starlark_docs_test(name = "docs_test")

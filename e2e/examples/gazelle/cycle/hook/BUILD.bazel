@@ -1,0 +1,11 @@
+filegroup(
+    name = "build",
+    srcs = ["build.dart"],
+    visibility = ["//gazelle/cycle:__pkg__"],
+)
+
+filegroup(
+    name = "link",
+    srcs = ["link.dart"],
+    visibility = ["//gazelle/cycle:__pkg__"],
+)

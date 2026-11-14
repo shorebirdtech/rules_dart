@@ -11,6 +11,17 @@ dart_bootstrap_binary(
     deps = ["@ext_pub_deps//:crypto"],
 )
 
+# The executable of a `dart_binary` in a mode the VM runs, and of
+# `@rules_dart//dart`. Built by a rule without a launcher of its own.
+dart_tool_binary(
+    name = "launcher",
+    srcs = ["launcher_config.dart"],
+    compile_mode = "exe",
+    main = "launcher.dart",
+    visibility = ["//visibility:public"],
+    deps = ["//dart/runfiles"],
+)
+
 dart_binary(
     name = "noop",
     compile_mode = "exe",
@@ -18,64 +29,206 @@ dart_binary(
     visibility = ["//dart:__subpackages__"],
 )
 
+_ANALYZER_SRCS = [
+    "analysis_server.dart",
+    "analyzer.dart",
+    "dart_cli.dart",
+    "server_analyzer.dart",
+]
+
+# Run from source by the SDK's own VM, `dartvm`, which is what hosts the analysis
+# server: the runners are AOT-compiled and cannot load its JIT snapshot.
+exports_files(
+    ["analysis_host.dart"],
+    visibility = ["//dart:__subpackages__"],
+)
+
 dart_binary(
     name = "analyze_runner",
-    srcs = [
-        "analysis_server.dart",
-        "analyzer.dart",
-        "dart_cli.dart",
-        "server_analyzer.dart",
-    ],
+    srcs = _ANALYZER_SRCS,
     compile_mode = "exe",
     main = "analyze_runner.dart",
     visibility = ["//dart:__subpackages__"],
+    deps = ["@ext_pub_deps//:bazel_worker"],
 )
 
 dart_binary(
     name = "fix_runner",
-    srcs = [
-        "analysis_server.dart",
-        "analyzer.dart",
-        "dart_cli.dart",
-        "server_analyzer.dart",
-    ],
+    srcs = _ANALYZER_SRCS + ["changes.dart"],
     compile_mode = "exe",
     main = "fix_runner.dart",
     visibility = ["//dart:__subpackages__"],
+    deps = [
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:crypto",
+    ],
 )
 
-dart_binary(
-    name = "fix_applier",
-    compile_mode = "exe",
-    main = "fix_applier.dart",
+# The sources of `@rules_dart//dart/format`, `@rules_dart//dart/fix` and
+# `@rules_dart//dart/unused_deps`.
+exports_files(
+    [
+        "apply_args.dart",
+        "apply_changes.dart",
+        "build_events.dart",
+        "changes.dart",
+        "unused_deps_fix.dart",
+        "unused_deps_main.dart",
+    ],
+    visibility = [
+        "//dart/fix:__pkg__",
+        "//dart/format:__pkg__",
+        "//dart/unused_deps:__pkg__",
+    ],
+)
+
+# Run from source by the SDK's own `dart` in the web compile: a script, so the
+# action needs no tool built for another platform.
+exports_files(
+    ["wasm_outputs.dart"],
     visibility = ["//dart:__subpackages__"],
+)
+
+dart_test(
+    name = "wasm_outputs_test",
+    size = "small",
+    srcs = ["wasm_outputs.dart"],
+    main = "wasm_outputs_test.dart",
+    deps = ["@ext_pub_deps//:test"],
+)
+
+dart_test(
+    name = "apply_args_test",
+    size = "small",
+    srcs = ["apply_args.dart"],
+    main = "apply_args_test.dart",
+    deps = ["@ext_pub_deps//:test"],
+)
+
+dart_test(
+    name = "unused_deps_fix_test",
+    size = "small",
+    srcs = ["unused_deps_fix.dart"],
+    main = "unused_deps_fix_test.dart",
+    deps = ["@ext_pub_deps//:test"],
+)
+
+dart_test(
+    name = "changes_test",
+    size = "small",
+    srcs = ["changes.dart"],
+    main = "changes_test.dart",
+    deps = [
+        "@ext_pub_deps//:crypto",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 dart_binary(
     name = "test_runner",
+    srcs = [
+        "launcher_config.dart",
+        "runner_snapshot.dart",
+    ],
     compile_mode = "exe",
     main = "test_runner.dart",
     visibility = ["//dart:__subpackages__"],
-    deps = ["//dart/runfiles"],
+    deps = [
+        "//dart/kernel_list",
+        "//dart/runfiles",
+        "@ext_pub_deps//:ffi",
+    ],
 )
 
-# What `test_runner_test` runs through the launcher in place of a real test.
-dart_binary(
+dart_test(
+    name = "runner_snapshot_test",
+    size = "small",
+    srcs = ["runner_snapshot.dart"],
+    main = "runner_snapshot_test.dart",
+    deps = [
+        "@ext_pub_deps//:ffi",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# What `test_runner_test` runs through its launcher in place of a real test.
+# Run on its own, with no arguments, it passes.
+dart_test(
     name = "test_runner_fixture",
-    compile_mode = "kernel",
+    size = "small",
     main = "test_runner_fixture.dart",
 )
 
+# What `test_runner_test` and `runner_snapshot_cache_test` run through their
+# launcher under `package:test`'s runner. Run on its own, it passes.
+dart_test(
+    name = "test_runner_runner_fixture",
+    size = "small",
+    main = "test_runner_runner_fixture.dart",
+    deps = ["@ext_pub_deps//:test"],
+)
+
+# What `test_runner_test` runs through its launcher to select cases by tag.
+# Run on its own, it passes.
+dart_test(
+    name = "test_runner_tags_fixture",
+    size = "small",
+    exclude_tags = ["slow"],
+    include_tags = ["unit || integration"],
+    main = "test_runner_tags_fixture.dart",
+    deps = ["@ext_pub_deps//:test"],
+)
+
+# The same suite with `include_tags` that select none of its cases, which
+# fails: `test_runner_test` runs it to see that.
+dart_test(
+    name = "test_runner_unmatched_tags_fixture",
+    size = "small",
+    include_tags = ["absent"],
+    main = "test_runner_tags_fixture.dart",
+    tags = ["manual"],
+    deps = ["@ext_pub_deps//:test"],
+)
+
+# The launcher's pure functions, in process.
+dart_test(
+    name = "test_runner_unit_test",
+    size = "small",
+    srcs = [
+        "launcher_config.dart",
+        "runner_snapshot.dart",
+        "test_runner.dart",
+    ],
+    main = "test_runner_unit_test.dart",
+    deps = [
+        "//dart/kernel_list",
+        "//dart/runfiles",
+        "@ext_pub_deps//:ffi",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The launcher as a process: what its functions cannot show.
 dart_test(
     name = "test_runner_test",
     size = "small",
     args = [
-        "$(rlocationpath :test_runner)",
         "$(rlocationpath :test_runner_fixture)",
+        "$(rlocationpath :test_runner_runner_fixture)",
+        "$(rlocationpath //dart/tests/shared_library_asset_fixture:shared_library_asset_test)",
+        "$(rlocationpath :test_runner_tags_fixture)",
+        "$(rlocationpath :test_runner_unmatched_tags_fixture)",
+        "$(rlocationpath //dart/tests/test_layout_fixture:layout_test)",
+        "$(rlocationpath @bazel_skylib//:bzl_library.bzl)",
     ],
     data = [
-        ":test_runner",
         ":test_runner_fixture",
+        ":test_runner_runner_fixture",
+        ":test_runner_tags_fixture",
+        ":test_runner_unmatched_tags_fixture",
+        "//dart/tests/shared_library_asset_fixture:shared_library_asset_test",
+        "//dart/tests/test_layout_fixture:layout_test",
+        "@bazel_skylib//:bzl_library.bzl",
     ],
     main = "test_runner_test.dart",
     deps = [
@@ -84,32 +237,61 @@ dart_test(
     ],
 )
 
-dart_binary(
-    name = "format_runner",
-    compile_mode = "exe",
-    main = "format_runner.dart",
-    visibility = ["//dart:__subpackages__"],
+# The runner snapshot cache through the launcher, which trains real snapshots.
+dart_test(
+    name = "runner_snapshot_cache_test",
+    size = "medium",
+    args = ["$(rlocationpath :test_runner_runner_fixture)"],
+    data = [":test_runner_runner_fixture"],
+    main = "runner_snapshot_cache_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 dart_binary(
-    name = "format_writer",
+    name = "format_runner",
+    srcs = ["changes.dart"],
     compile_mode = "exe",
-    main = "format_writer.dart",
+    main = "format_runner.dart",
     visibility = ["//dart:__subpackages__"],
-    deps = ["//dart/runfiles"],
+    deps = ["@ext_pub_deps//:crypto"],
+)
+
+dart_binary(
+    name = "format_check",
+    srcs = ["changes.dart"],
+    compile_mode = "exe",
+    main = "format_check.dart",
+    visibility = ["//dart:__subpackages__"],
+    deps = ["@ext_pub_deps//:crypto"],
 )
 
 dart_binary(
     name = "link_hook_runner",
     compile_mode = "exe",
     main = "link_hook_runner.dart",
-    # Public: rules calling `dart_link_hook_actions` declare it as an attribute.
+    # Public: rules calling `dart_program_assets_actions` declare it as an
+    # attribute.
     visibility = ["//visibility:public"],
     deps = [
         "@ext_pub_deps//:args",
+        "@ext_pub_deps//:code_assets",
         "@ext_pub_deps//:data_assets",
         "@ext_pub_deps//:hooks",
+        "@ext_pub_deps//:logging",
     ],
+)
+
+dart_binary(
+    name = "link_exports",
+    compile_mode = "exe",
+    main = "link_exports.dart",
+    # Public: rules calling `dart_program_assets_actions` declare it as an
+    # attribute.
+    visibility = ["//visibility:public"],
+    deps = ["@ext_pub_deps//:args"],
 )
 
 _KERNEL_TOOL_SRCS = [
@@ -117,14 +299,19 @@ _KERNEL_TOOL_SRCS = [
     "kernel_tool/check_command.dart",
     "kernel_tool/commands.dart",
     "kernel_tool/compile.dart",
+    "kernel_tool/cycle.dart",
+    "kernel_tool/declared_view.dart",
+    "kernel_tool/digest_command.dart",
     "kernel_tool/directives.dart",
     "kernel_tool/entry_command.dart",
+    "kernel_tool/frontend_command.dart",
     "kernel_tool/link_command.dart",
     "kernel_tool/manifest.dart",
     "kernel_tool/module_command.dart",
     "kernel_tool/module_graph.dart",
     "kernel_tool/policy.dart",
     "kernel_tool/sources.dart",
+    "kernel_tool/unused_deps.dart",
     "kernel_tool/uris.dart",
     "kernel_tool/worker_command.dart",
 ]
@@ -153,4 +340,327 @@ dart_test(
     srcs = _KERNEL_TOOL_SRCS,
     main = "kernel_tool_test.dart",
     deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+)
+
+# `kernel_tool frontend` over the SDK's real front end: silent on success, the
+# compiler's message on failure.
+dart_test(
+    name = "frontend_command_test",
+    size = "small",
+    args = [
+        "$(rlocationpath :kernel_tool)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_kernel)",
+    ],
+    data = [
+        ":kernel_tool",
+        "//dart/tests/sdk_files:copy_kernel",
+    ],
+    main = "frontend_command_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# `kernel_tool module` as a persistent worker over the SDK's real
+# `kernel_worker`: a request reads only the inputs it declares.
+dart_test(
+    name = "module_worker_test",
+    size = "small",
+    args = [
+        "$(rlocationpath :kernel_tool)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_kernel)",
+    ],
+    data = [
+        ":kernel_tool",
+        "//dart/tests/sdk_files:copy_kernel",
+    ],
+    main = "module_worker_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "import_policy_test",
+    size = "small",
+    srcs = _KERNEL_TOOL_SRCS,
+    main = "import_policy_test.dart",
+    deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+)
+
+dart_test(
+    name = "unused_deps_test",
+    size = "small",
+    srcs = _KERNEL_TOOL_SRCS,
+    main = "unused_deps_test.dart",
+    deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+)
+
+dart_test(
+    name = "server_analyzer_test",
+    size = "medium",
+    srcs = _ANALYZER_SRCS,
+    args = [
+        "$(rlocationpath :analysis_host.dart)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_analyze)",
+    ],
+    data = [
+        ":analysis_host.dart",
+        "//dart/tests/sdk_files:copy_analyze",
+    ],
+    main = "server_analyzer_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The host's end with its parent, on every OS.
+dart_test(
+    name = "analysis_host_test",
+    size = "small",
+    args = [
+        "$(rlocationpath :analysis_host.dart)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_run)",
+    ],
+    data = [
+        ":analysis_host.dart",
+        "//dart/tests/sdk_files:copy_run",
+    ],
+    main = "analysis_host_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The server's end with its worker, checked by process (`pgrep`), so not on
+# Windows.
+dart_test(
+    name = "analysis_worker_test",
+    size = "medium",
+    args = [
+        "$(rlocationpath :analyze_runner)",
+        "$(rlocationpath :analysis_host.dart)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_analyze)",
+    ],
+    data = [
+        ":analysis_host.dart",
+        ":analyze_runner",
+        "//dart/tests/sdk_files:copy_analyze",
+    ],
+    main = "analysis_worker_test.dart",
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The worker's correctness guard, minutes long: in the `deep` tier, which
+# `bazel test --config=deep` runs.
+dart_test(
+    name = "analysis_restage_test",
+    size = "large",
+    args = [
+        "$(rlocationpath :analyze_runner)",
+        "$(rlocationpath :analysis_host.dart)",
+        "$(rlocationpath //dart/tests/sdk_files:copy_analyze)",
+    ],
+    data = [
+        ":analysis_host.dart",
+        ":analyze_runner",
+        "//dart/tests/sdk_files:copy_analyze",
+    ],
+    main = "analysis_restage_test.dart",
+    tags = ["deep"],
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The package config a compiled program run by `dart_binary`'s launcher or
+# `dart_test`'s is given: none of its packages, so the VM does not look for
+# one up from the program, where it would find the workspace's own
+# `.dart_tool` through the exec root.
+exports_files(
+    ["empty_package_config.json"],
+    visibility = ["//visibility:public"],
+)
+
+# Strips a target's kernel modules to the outlines dependents compile against
+# (`--@rules_dart//dart:outline_kernel`). Each `dart_kernel_source` repository
+# builds it on its own SDK's `pkg/kernel`, which must match the SDK whose
+# modules it reads; so may a rule set or a user with an SDK of their own.
+exports_files(
+    ["kernel_outline.dart"],
+    visibility = ["//visibility:public"],
+)
+
+_SUMMARY_ANALYZER_SRCS = [
+    "summary_analyzer.dart",
+    "summary_analyzer/analyze.dart",
+    "summary_analyzer/args.dart",
+    "summary_analyzer/context.dart",
+    "summary_analyzer/guards.dart",
+    "summary_analyzer/report.dart",
+    "summary_analyzer/summarize.dart",
+]
+
+# The summary analyzer, built by each SDK's `dart_analyzer_source` on that
+# SDK's own analyzer and linter.
+exports_files(
+    _SUMMARY_ANALYZER_SRCS,
+    visibility = ["//visibility:public"],
+)
+
+# The summary analyzer on the pinned release's analyzer and linter, as its
+# `dart_analyzer_source` builds it, but here, so that its sources are analyzed
+# and format-checked with this repository's.
+dart_binary(
+    name = "summary_analyzer",
+    srcs = _SUMMARY_ANALYZER_SRCS[1:],
+    compile_mode = "exe",
+    main = "summary_analyzer.dart",
+    deps = [
+        "@dart_analyzer_source//analyzer",
+        "@dart_analyzer_source//linter",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:path",
+        "@ext_pub_deps//:yaml",
+    ],
+)
+
+# The summary analyzer on staged projects: its reports, its refusals, and
+# which edits keep a summary's bytes. Built here, and as the pinned release's
+# `dart_analyzer_source(path = ...)` and `fetch_dart_analyzer_source` with a
+# prefix build it on a checkout of that release
+# (`//dart/tests:kernel_checkout.bzl`).
+[
+    dart_test(
+        name = name,
+        size = "small",
+        args = [
+            "$(rlocationpath %s)" % tool,
+            "$(rlocationpath //dart/private:summary_analyzer)",
+        ],
+        data = [
+            tool,
+            "//dart/private:summary_analyzer",
+        ] + extra,
+        main = "summary_analyzer_test.dart",
+        # The SDK summary is built only with summaries on.
+        target_compatible_with = select({
+            "//dart:is_analysis_summaries": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        deps = [
+            "//dart/runfiles",
+            "@ext_pub_deps//:path",
+            "@ext_pub_deps//:test",
+        ],
+    )
+    for name, tool, extra in [
+        ("summary_analyzer_test", ":summary_analyzer", []),
+        ("summary_analyzer_checkout_test", "@analyzer_checkout_source//:summary_analyzer", []),
+        (
+            "summary_analyzer_prefixed_test",
+            "@analyzer_prefixed_source//analyzer_source:summary_analyzer",
+            ["@analyzer_prefixed_source//:root_marker"],
+        ),
+    ]
+]
+
+# The pinned release's stripper, and the ones built on a checkout of the same
+# release: `dart_kernel_source(path = ...)`, and `fetch_dart_kernel_source` with
+# a prefix, from a repository with a root package of its own
+# (`//dart/tests:kernel_checkout.bzl`).
+[
+    dart_test(
+        name = name,
+        size = "small",
+        args = ["$(rlocationpath %s)" % tool],
+        data = [tool] + extra,
+        main = "kernel_outline_test.dart",
+        deps = [
+            "//dart/runfiles",
+            "@ext_pub_deps//:test",
+        ],
+    )
+    # `extra` is the root package the prefixed repository was written beside:
+    # a target there exists only if the helper left its `BUILD.bazel` alone.
+    for name, tool, extra in [
+        ("kernel_outline_test", "@dart_kernel_source//:outline_tool", []),
+        ("kernel_outline_checkout_test", "@kernel_checkout_source//:outline_tool", []),
+        (
+            "kernel_outline_prefixed_test",
+            "@kernel_prefixed_source//kernel_source:outline_tool",
+            ["@kernel_prefixed_source//:root_marker"],
+        ),
+    ]
+]
+
+# Converts coverage a VM reported (`package:coverage`'s JSON) to LCOV by
+# workspace path: `@rules_dart//dart:coverage_converter`, the public tool a test
+# rule runs, `dart_test` among them (`dart/private/dart_coverage.bzl`).
+dart_binary(
+    name = "coverage_converter",
+    srcs = ["coverage_lcov.dart"],
+    compile_mode = "exe",
+    main = "coverage_converter.dart",
+    visibility = ["//dart:__pkg__"],
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:coverage",
+    ],
+)
+
+# Collects a plain-`main()` `dart_test`'s coverage under `bazel coverage`;
+# `dart_test` ships it in runfiles only then.
+dart_binary(
+    name = "coverage_collector",
+    srcs = ["coverage_lcov.dart"],
+    compile_mode = "exe",
+    main = "coverage_collector.dart",
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:coverage",
+        "@ext_pub_deps//:vm_service",
+    ],
+)
+
+dart_test(
+    name = "coverage_lcov_test",
+    size = "small",
+    srcs = ["coverage_lcov.dart"],
+    main = "coverage_lcov_test.dart",
+    deps = [
+        "@ext_pub_deps//:coverage",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+# The command line `coverage_converter` documents, run as another test rule
+# would run it.
+dart_test(
+    name = "coverage_converter_test",
+    size = "small",
+    args = ["$(rlocationpath :coverage_converter)"],
+    data = [":coverage_converter"],
+    main = "coverage_converter_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:test",
+    ],
 )

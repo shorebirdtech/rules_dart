@@ -1,0 +1,18 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "ext_hook",
+    link_hook = "hook/link.dart",
+    link_hook_assets = ["package:ext_hook/ext_hook/names.json"],
+)
+
+# A package with a link hook that arrives from another module, as a pub
+# package does: its files are in an external repository. The hook's imports
+# come from the closure of the `dart_link_hook` that runs it.
+dart_library(
+    name = "ext_hook",
+    srcs = ["lib/ext_hook.dart"],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+)

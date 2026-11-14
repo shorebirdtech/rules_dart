@@ -8,8 +8,11 @@ import 'kernel_tool/args.dart';
 import 'kernel_tool/check_command.dart';
 import 'kernel_tool/commands.dart';
 import 'kernel_tool/compile.dart';
+import 'kernel_tool/cycle.dart';
+import 'kernel_tool/declared_view.dart';
 import 'kernel_tool/directives.dart';
 import 'kernel_tool/entry_command.dart';
+import 'kernel_tool/frontend_command.dart';
 import 'kernel_tool/manifest.dart';
 import 'kernel_tool/module_command.dart';
 import 'kernel_tool/module_graph.dart';
@@ -34,13 +37,17 @@ final _packageConfig = jsonEncode({
 
 final _librariesJson = jsonEncode({
   'vm_common': {
-    'libraries': {'core': {}, 'io': {}, 'ffi': {}},
+    'libraries': {
+      'core': <String, Object?>{},
+      'io': <String, Object?>{},
+      'ffi': <String, Object?>{},
+    },
   },
   'vm': {
     'include': [
       {'target': 'vm_common'},
     ],
-    'libraries': {'cli': {}},
+    'libraries': {'cli': <String, Object?>{}},
   },
 });
 
@@ -88,11 +95,10 @@ Manifest _manifest(
   String label,
   List<ModuleRecord> modules, {
   String? package,
-  String? libRoot,
+  String? packageRoot,
 }) => Manifest(
   label: label,
-  package: package,
-  libRoot: libRoot,
+  packages: {?package: packageRoot ?? ''},
   dir: 'out/${label.replaceAll(RegExp('[/:]'), '_')}',
   modules: modules,
 );
@@ -521,44 +527,54 @@ import 'stub.dart' if (dart.library.io) 'src/io.dart' if (dart.library.html) 'sr
       Set<String> direct = const {},
       Set<String> depFiles = const {},
       String? own,
+      bool parts = true,
     }) {
-      final libraries = <String, ImportingFile>{};
-      final parts = <String>{};
-      for (final e in files.entries) {
-        final uri = _config.uriFor(rootRelative(e.key, _roots));
-        final d = readDirectives(e.key, e.value);
-        if (d.isPart) {
-          parts.add(uri);
-          continue;
-        }
-        libraries[uri] = ImportingFile(e.key, [
-          for (final directive in d.directives)
-            ...resolveImport(directive, uri, null, _config).candidates,
-        ]);
-      }
+      final checked = [
+        for (final e in files.entries)
+          CheckedFile(
+            path: e.key,
+            rootPath: rootRelative(e.key, _roots),
+            uri: _config.uriFor(rootRelative(e.key, _roots)),
+            directives: readDirectives(e.key, e.value),
+          ),
+      ];
       return checkPolicy(
         label: '//app:lib',
-        libraries: libraries,
-        partFiles: parts,
+        files: checked,
         config: _config,
         availablePackages: available,
         dependencyFiles: depFiles,
         checkLayering: layering,
         directPackages: direct,
-        ownPackage: own,
+        ownPackages: {?own},
+        checkParts: parts,
       );
     }
 
+    test("leaves a generator's inputs' parts, which it has yet to write", () {
+      final files = {
+        'app/lib/a.dart': "import 'package:dep/d.dart';\npart 'a.g.dart';",
+      };
+      expect(check(files, available: {'dep'}), hasLength(1));
+      expect(check(files, available: {'dep'}, parts: false), isEmpty);
+      expect(check(files, parts: false).map((v) => v.message), [
+        contains('no dependency of //app:lib provides package "dep"'),
+      ]);
+    });
+
     test('reports every import of a package no dependency provides', () {
-      final v = check({
-        'app/lib/a.dart': '''
+      final v = check(
+        {
+          'app/lib/a.dart': '''
 import 'package:missing/m.dart';
 import 'package:missing/n.dart';
 import 'package:missing/m.dart';
 import 'package:app/a.dart';
 import 'package:rel/ok.dart';
 ''',
-      });
+        },
+        depFiles: {'package:rel/ok.dart'},
+      );
       expect(v.map((v) => v.message), [
         '//app:lib: app/lib/a.dart imports package:missing/m.dart, but no '
             'dependency of //app:lib provides package "missing". Add the target '
@@ -571,6 +587,21 @@ import 'package:rel/ok.dart';
         'package:app/a.dart',
         'package:app/a.dart',
       ]);
+    });
+
+    test('suggests a cycle when a library misses a package', () {
+      expect(
+        check({
+          'app/lib/a.dart': "import 'package:missing/m.dart';",
+        }, own: 'app').map((v) => v.message),
+        [
+          '//app:lib: app/lib/a.dart imports package:missing/m.dart, but no '
+              'dependency of //app:lib provides package "missing". Add the '
+              'target that provides it to deps. If package "missing" imports '
+              'this one in turn, the two are a dependency cycle: build them as '
+              'one `dart_package_cycle`.',
+        ],
+      );
     });
 
     test('accepts packages from the available list', () {
@@ -690,32 +721,156 @@ import 'package:app/own.dart';
 ]}''', 'app/pc.json');
 
     test('layering still reports a package only a dependency provides', () {
-      final uri = everything.uriFor(rootRelative('app/lib/a.dart', _roots));
-      final d = readDirectives(
-        'app/lib/a.dart',
-        "import 'package:direct/d.dart';\nimport 'package:indirect/i.dart';",
-      );
       final v = checkPolicy(
         label: '//app:lib',
-        libraries: {
-          uri: ImportingFile('app/lib/a.dart', [
-            for (final directive in d.directives)
-              ...resolveImport(directive, uri, null, everything).candidates,
-          ]),
-        },
-        partFiles: const {},
+        files: [
+          CheckedFile(
+            path: 'app/lib/a.dart',
+            rootPath: 'app/lib/a.dart',
+            uri: everything.uriFor('app/lib/a.dart'),
+            directives: readDirectives(
+              'app/lib/a.dart',
+              "import 'package:direct/d.dart';\nimport 'package:indirect/i.dart';",
+            ),
+          ),
+        ],
         config: everything,
         availablePackages: const {'app', 'direct', 'indirect'},
-        dependencyFiles: const {},
+        dependencyFiles: const {
+          'package:direct/d.dart',
+          'package:indirect/i.dart',
+        },
         checkLayering: true,
         directPackages: const {'direct'},
-        ownPackage: 'app',
+        ownPackages: {'app'},
       );
       expect(v.map((v) => v.message), [
         '//app:lib: app/lib/a.dart imports package:indirect/i.dart, but package '
             '"indirect" is not a direct dependency of //app:lib, only of '
             'something it depends on. Add the target that provides it to deps.',
       ]);
+    });
+  });
+
+  group('cycleError', () {
+    final config = PackageConfig.parse(
+      jsonEncode({
+        'configVersion': 2,
+        'packages': [
+          for (final p in ['a', 'b', 'c', 'd'])
+            {
+              'name': p,
+              'rootUri': 'org-dartlang-root:///$p/',
+              'packageUri': 'lib/',
+            },
+        ],
+      }),
+      'x/pc.json',
+    );
+
+    String? check(
+      Map<String, String> files, {
+      Set<String> own = const {'a', 'b'},
+      Set<String> available = const {},
+    }) => cycleError(
+      label: '//x:cycle',
+      files: [
+        for (final e in files.entries)
+          CheckedFile(
+            path: e.key,
+            rootPath: e.key,
+            uri: config.uriFor(e.key),
+            directives: readDirectives(e.key, e.value),
+          ),
+      ],
+      config: config,
+      ownPackages: own,
+      availablePackages: available,
+    );
+
+    test('accepts packages that import each other', () {
+      expect(
+        check({
+          'a/lib/a.dart': "import 'package:b/b.dart';",
+          'b/lib/b.dart': "export 'package:a/a.dart';",
+        }),
+        isNull,
+      );
+    });
+
+    test('counts every branch of a conditional import', () {
+      expect(
+        check({
+          'a/lib/a.dart':
+              "import 'x.dart' if (dart.library.io) 'package:b/b.dart';",
+          'b/lib/b.dart': "import 'package:a/a.dart';",
+        }),
+        isNull,
+      );
+    });
+
+    test('refuses packages that are no cycle', () {
+      expect(
+        check({
+          'a/lib/a.dart': "import 'package:b/b.dart';",
+          'b/lib/b.dart': '',
+        }),
+        '//x:cycle builds `a` and `b` as one dependency cycle, but they are '
+        'not one: `a` and `b` are in no cycle. Build each package as its own '
+        '`dart_library`, and remove //x:cycle.',
+      );
+    });
+
+    test('names a member outside the cycle', () {
+      expect(
+        check(
+          {
+            'a/lib/a.dart': "import 'package:b/b.dart';",
+            'b/lib/b.dart': "import 'package:a/a.dart';",
+            'c/lib/c.dart': "import 'package:a/a.dart';",
+          },
+          own: {'a', 'b', 'c'},
+        ),
+        '//x:cycle builds `a`, `b` and `c` as one dependency cycle, but they '
+        'are not one: `a` and `b` import each other (a -> b -> a); `c` is in '
+        'no cycle with the others. Build `c` outside `members`, as a '
+        '`dart_library`.',
+      );
+    });
+
+    test('refuses two cycles in one target', () {
+      expect(
+        check(
+          {
+            'a/lib/a.dart': "import 'package:b/b.dart';",
+            'b/lib/b.dart': "import 'package:a/a.dart';",
+            'c/lib/c.dart': "import 'package:d/d.dart';",
+            'd/lib/d.dart': "import 'package:c/c.dart';",
+          },
+          own: {'a', 'b', 'c', 'd'},
+        ),
+        '//x:cycle builds `a`, `b`, `c` and `d` as one dependency cycle, but '
+        'they are not one: `a` and `b` import each other (a -> b -> a); `c` '
+        'and `d` import each other (c -> d -> c). Build each cycle as its own '
+        '`dart_package_cycle`.',
+      );
+    });
+
+    test('names the package no dependency provides that may close it', () {
+      expect(
+        check(
+          {
+            'a/lib/a.dart': "import 'package:b/b.dart';",
+            'b/lib/b.dart': "import 'package:missing/m.dart';",
+          },
+          available: {'provided'},
+        ),
+        '//x:cycle builds `a` and `b` as one dependency cycle, but they are '
+        'not one: `a` and `b` are in no cycle. `b` imports `missing`, which no '
+        'dependency provides: if it imports the members in turn, add it to '
+        '`members`. Otherwise, build each package as its own `dart_library`, '
+        'and remove //x:cycle.',
+      );
     });
   });
 
@@ -848,7 +1003,7 @@ import 'package:app/own.dart';
           _module(0, ['package:p/p.dart']),
         ],
         package: 'p',
-        libRoot: '../hub1',
+        packageRoot: '../hub1',
       );
       final second = _manifest(
         '//hub2:p',
@@ -857,11 +1012,33 @@ import 'package:app/own.dart';
           _module(1, ['package:p/extra.dart']),
         ],
         package: 'p',
-        libRoot: '../hub2',
+        packageRoot: '../hub2',
       );
       final index = ModuleIndex([first, second]);
       expect(index.moduleOf('package:p/p.dart')!.manifest, first);
       expect(index.moduleOf('package:p/extra.dart'), isNull);
+    });
+
+    test('packages that depend on each other, from a second hub, are ignored whole', () {
+      Manifest group(String label, String hub) => Manifest(
+        label: label,
+        packages: {'a': '../$hub/a', 'b': '../$hub/b'},
+        dir: 'out/$hub',
+        modules: [
+          _module(0, ['package:a/a.dart', 'package:b/b.dart']),
+        ],
+      );
+      final first = group('//hub1:a', 'hub1');
+      final second = group('//hub2:a', 'hub2');
+      final index = ModuleIndex([first, second]);
+      expect(index.moduleOf('package:b/b.dart')!.manifest, first);
+      expect(
+        uniqueModules([
+          index.moduleOf('package:a/a.dart')!,
+          ModuleRef(second, second.modules.single),
+        ]).conflicts,
+        isEmpty,
+      );
     });
 
     test('any other overlap leaves the library to the earlier module', () {
@@ -874,6 +1051,24 @@ import 'package:app/own.dart';
       final index = ModuleIndex([first, second]);
       expect(index.moduleOf('package:x/x.dart')!.manifest, first);
       expect(index.moduleOf('package:y/y.dart')!.manifest, second);
+    });
+  });
+
+  group('unusedModuleDirs', () {
+    test('names the directories the entrypoint reaches nothing in', () {
+      final a = _manifest('//a:a', [
+        _module(0, ['package:a/a.dart'], deps: ['package:b/b.dart']),
+        _module(1, ['package:a/other.dart']),
+      ]);
+      final b = _manifest('//b:b', [
+        _module(0, ['package:b/b.dart']),
+      ]);
+      final c = _manifest('//c:c', [
+        _module(0, ['package:c/c.dart']),
+      ]);
+      final reach = ModuleIndex([a, b, c]).reach(['package:a/a.dart']);
+      // `a` is reached in part, so its directory stays an input.
+      expect(unusedModuleDirs([a, b, c], reach), [c.dir]);
     });
   });
 
@@ -935,7 +1130,7 @@ import 'package:app/own.dart';
           _module(0, ['package:p/p.dart']),
         ],
         package: 'p',
-        libRoot: '../h1',
+        packageRoot: '../h1',
       );
       final b = _manifest(
         '//h2:p',
@@ -943,7 +1138,7 @@ import 'package:app/own.dart';
           _module(0, ['package:p/p.dart']),
         ],
         package: 'p',
-        libRoot: '../h2',
+        packageRoot: '../h2',
       );
       final u = uniqueModules([ref(a, 0), ref(b, 0)]);
       expect(u.kept.map((r) => r.manifest.label), ['//h1:p']);
@@ -965,14 +1160,14 @@ import 'package:app/own.dart';
       ]);
     });
 
-    test('same package and same lib_root is still an error', () {
+    test('same package and same package_root is still an error', () {
       final a = _manifest(
         '//a:p',
         [
           _module(0, ['package:p/p.dart']),
         ],
         package: 'p',
-        libRoot: 'r',
+        packageRoot: 'r',
       );
       final b = _manifest(
         '//b:p',
@@ -980,7 +1175,7 @@ import 'package:app/own.dart';
           _module(0, ['package:p/p.dart']),
         ],
         package: 'p',
-        libRoot: 'r',
+        packageRoot: 'r',
       );
       expect(uniqueModules([ref(a, 0), ref(b, 0)]).conflicts, hasLength(1));
     });
@@ -1014,6 +1209,35 @@ import 'package:app/own.dart';
       expect(Args.expand(['--label', 'a']), ['--label', 'a']);
     });
 
+    test('hands on what follows -- as it is', () {
+      final args = Args.parse('frontend', [
+        '--runtime',
+        'rt',
+        '--',
+        'snapshot',
+        '--runtime',
+        '-DA=x,y',
+        '@not-a-file',
+      ]);
+      expect(args.one('runtime'), 'rt');
+      expect(args.rest, ['snapshot', '--runtime', '-DA=x,y', '@not-a-file']);
+      expect(Args.parse('frontend', ['--runtime', 'rt']).rest, isEmpty);
+    });
+
+    test('expands a params file up to the -- and no further', () {
+      final dir = Directory.systemTemp.createTempSync('kernel_tool_test_');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final params = File('${dir.path}/p')
+        ..writeAsStringSync('--runtime\nrt\n--\n@x\n');
+      expect(Args.expand(['@${params.path}']), ['--runtime', 'rt', '--', '@x']);
+      expect(Args.expand(['--runtime', 'rt', '--', '@${params.path}']), [
+        '--runtime',
+        'rt',
+        '--',
+        '@${params.path}',
+      ]);
+    });
+
     test('reports a missing or unknown option instead of exiting', () {
       expect(
         () => Args.parse('module', []).one('label'),
@@ -1025,6 +1249,26 @@ import 'package:app/own.dart';
       );
       expect(
         () => Args.parse('module', ['--check-layering']),
+        throwsA(isA<UsageException>()),
+      );
+    });
+
+    test('takes --track-creation-locations without a value', () {
+      for (final command in ['module', 'entry']) {
+        final args = Args.parse(command, [
+          '--track-creation-locations',
+          '--label',
+          'a',
+        ]);
+        expect(args.flag('track-creation-locations'), isTrue, reason: command);
+        expect(args.one('label'), 'a');
+        expect(
+          Args.parse(command, []).flag('track-creation-locations'),
+          isFalse,
+        );
+      }
+      expect(
+        () => Args.parse('link', ['--track-creation-locations']),
         throwsA(isA<UsageException>()),
       );
     });
@@ -1047,7 +1291,6 @@ import 'package:app/own.dart';
     });
 
     test('a stop kills a compiler that would never exit', () async {
-      if (Platform.isWindows) return;
       // A "compiler" that ignores its stdin, as a kernel_worker does whose
       // stdin a stray forked child holds open.
       final dir = Directory.systemTemp.createTempSync('serve_test');
@@ -1071,31 +1314,9 @@ import 'package:app/own.dart';
       stop.add(null);
       expect(await served, 143);
       expect(await _gone(compiler), isTrue);
-    });
-  });
-
-  group('KernelWorker', () {
-    test(
-      'a compiler that never answers fails the compile and is stopped',
-      () async {
-        if (Platform.isWindows) return;
-        final dir = Directory.systemTemp.createTempSync('stall_test');
-        addTearDown(() => dir.deleteSync(recursive: true));
-        final pidFile = File('${dir.path}/compiler.pid');
-        final script = File('${dir.path}/compiler.sh')
-          ..writeAsStringSync('echo \$\$ > ${pidFile.path}\nexec sleep 600\n');
-        final kernel = KernelWorker(
-          '/bin/sh',
-          script.path,
-          deadline: const Duration(milliseconds: 500),
-        );
-        await expectLater(
-          kernel.compile([], [], Digests()),
-          throwsA(isA<CompilerStalled>()),
-        );
-        expect(await _gone(await _pid(pidFile)), isTrue);
-      },
-    );
+      // The stand-in compiler is a POSIX shell script, and whether it is gone
+      // is asked with a POSIX signal.
+    }, skip: Platform.isWindows ? 'needs /bin/sh and POSIX signals' : false);
   });
 
   group('Digests', () {
@@ -1113,6 +1334,172 @@ import 'package:app/own.dart';
       expect(hashed, hasLength(32));
       file.writeAsStringSync('changed');
       expect(Digests().of(file.path), isNot(hashed));
+    });
+  });
+
+  test('digest writes the SHA-256 of its input in hex', () async {
+    final dir = Directory.systemTemp.createTempSync('kernel_tool_test_');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final input = File('${dir.path}/runner.dill')..writeAsStringSync('abc');
+    final output = '${dir.path}/runner.dill.sha256';
+    expect(
+      await runKernelTool([
+        'digest',
+        '--input',
+        input.path,
+        '--output',
+        output,
+      ]),
+      0,
+    );
+    expect(
+      File(output).readAsStringSync(),
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n',
+    );
+  });
+
+  group('DeclaredView', () {
+    test('a root is a file: URI the compiler resolves to that directory', () {
+      for (final (path, windows, back) in [
+        ('C:/Users/me/Temp/view/_main', true, r'C:\Users\me\Temp\view\_main\'),
+        ('/tmp/view/_main', false, '/tmp/view/_main/'),
+      ]) {
+        final resolved = Uri.base.resolve(rootArgument(path, windows: windows));
+        expect(resolved.scheme, 'file');
+        expect(resolved.toFilePath(windows: windows), back);
+      }
+    });
+
+    test('holds the declared files at the paths kernel roots map to', () {
+      // Laid out as Bazel lays out an exec root, a sibling repository beside
+      // it; paths are relative to the exec root, the working directory.
+      final top = Directory.systemTemp.createTempSync('kernel_tool_test_');
+      final home = Directory.current;
+      addTearDown(() {
+        Directory.current = home;
+        top.deleteSync(recursive: true);
+      });
+      void write(String path) => File('${top.path}/$path')
+        ..parent.createSync(recursive: true)
+        ..writeAsStringSync(path);
+      for (final path in [
+        '_main/app/lib/a.dart',
+        '_main/app/lib/undeclared.dart',
+        '_main/out/bin/app/lib/a.dart',
+        '_main/out/bin/app/gen/g.dart',
+        '_main/out/bin/app/gen/h.dart',
+        'repo/lib/r.dart',
+      ]) {
+        write(path);
+      }
+      Directory.current = '${top.path}/_main';
+
+      final view = DeclaredView.stage(
+        // A file may come more than once: an executable's `main` is also in
+        // its `srcs`, a directory is passed beside a file in it, a path is
+        // spelled two ways.
+        paths: [
+          'app/lib',
+          'app/lib/a.dart',
+          './app/lib/a.dart',
+          'out/bin/app/gen',
+          'out/bin/app/gen/g.dart',
+          '../repo/lib/r.dart',
+          '../repo/lib/r.dart',
+        ],
+        // A tree artifact may be declared whole, or file by file.
+        declared: ['./app/lib/a.dart', 'out/bin/app/gen', '../repo/lib/r.dart'],
+        roots: ['out/bin', '.', '../repo'],
+      );
+      addTearDown(view.delete);
+      String? read(String root, String path) {
+        final file = File('${view.of(root)}/$path');
+        return file.existsSync() ? file.readAsStringSync() : null;
+      }
+
+      expect(read('out/bin', 'app/lib/a.dart'), isNull);
+      expect(read('.', 'app/lib/a.dart'), '_main/app/lib/a.dart');
+      expect(read('.', 'app/lib/undeclared.dart'), isNull);
+      expect(read('out/bin', 'app/gen/g.dart'), '_main/out/bin/app/gen/g.dart');
+      expect(read('out/bin', 'app/gen/h.dart'), '_main/out/bin/app/gen/h.dart');
+      expect(read('../repo', 'lib/r.dart'), 'repo/lib/r.dart');
+    });
+  });
+
+  group('runFrontend', () {
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('kernel_tool_test_'));
+    tearDown(() => dir.deleteSync(recursive: true));
+
+    // A compiler that answers as `frontend_server` does, run by this VM.
+    Future<(int, String)> run(String protocol, {int exitCode = 0}) async {
+      final script = File('${dir.path}/fake.dart')
+        ..writeAsStringSync(
+          "import 'dart:io';\n"
+          'void main() {\n'
+          '  stdout.write(${jsonEncode(protocol)});\n'
+          '  exit($exitCode);\n'
+          '}\n',
+        );
+      final err = StringBuffer();
+      final code = await runFrontend(
+        Args.parse('frontend', [
+          '--runtime',
+          Platform.resolvedExecutable,
+          '--',
+          script.path,
+        ]),
+        err: err,
+      );
+      return (code, err.toString());
+    }
+
+    test('says nothing about a compile that succeeded', () async {
+      expect(await run('result abc\nabc\nabc out.dill 0\n'), (0, ''));
+    });
+
+    test(
+      'shows the compiler\'s messages, not its protocol, on failure',
+      () async {
+        final (code, err) = await run(
+          'result abc\nmain.dart:1:1: Error: Bad thing.\nabc\nabc out.dill 1\n',
+          exitCode: 254,
+        );
+        expect(code, 1);
+        expect(err, 'main.dart:1:1: Error: Bad thing.\n');
+      },
+    );
+
+    test('fails on an error count even when the exit status is 0', () async {
+      final (code, err) = await run(
+        'result abc\nmain.dart:1:1: Error: Bad thing.\nabc\nabc out.dill 1\n',
+      );
+      expect(code, 1);
+      expect(err, contains('Bad thing'));
+    });
+
+    test('keeps warnings from a compile that succeeded', () async {
+      final (code, err) = await run(
+        'result abc\nmain.dart:1:1: Warning: Odd.\nabc\nabc out.dill 0\n',
+      );
+      expect(code, 0);
+      expect(err, 'main.dart:1:1: Warning: Odd.\n');
+    });
+
+    test('reports a compiler that never answered', () async {
+      final (code, err) = await run('');
+      expect(code, 1);
+      expect(err, contains('did not report a result'));
+      final (crashCode, crashErr) = await run('boom\n', exitCode: 255);
+      expect(crashCode, 1);
+      expect(crashErr, 'boom\n');
+    });
+
+    test('needs a command line to run', () {
+      expect(
+        () => runFrontend(Args.parse('frontend', ['--runtime', 'rt'])),
+        throwsA(isA<UsageException>()),
+      );
     });
   });
 
@@ -1150,13 +1537,12 @@ import 'package:app/own.dart';
         ),
       ],
       package: 'a',
-      libRoot: 'lib',
+      packageRoot: 'lib',
     );
     final file = File('${dir.path}/m.json')..writeAsStringSync(m.toJson());
     final back = Manifest.read('out', file.path);
     expect(back.label, '//a:a');
-    expect(back.package, 'a');
-    expect(back.libRoot, 'lib');
+    expect(back.packages, {'a': 'lib'});
     expect(back.modules[0].dill, '0.dill');
     expect(back.modules[0].parts, ['package:a/a.g.dart']);
     expect(back.modules[0].deps, ['package:b/b.dart']);
@@ -1216,7 +1602,7 @@ import 'package:app/own.dart';
         path('root/app/pc.json'),
         '--package-name',
         'app',
-        '--lib-root',
+        '--package-root',
         'app',
         '--multi-root',
         path('root'),
@@ -1260,11 +1646,11 @@ import 'package:app/own.dart';
           0,
           reason: '$err',
         );
+        expect(worker.compiles, hasLength(4));
         final failed = worker.compiles.indexWhere(
           (c) => c.source.endsWith('b.dart'),
         );
-        expect(worker.compiles, hasLength(4));
-        expect(failed, greaterThan(0));
+        expect(failed, isNot(3), reason: 'a module must follow the failure');
         for (final (i, c) in worker.compiles.indexed) {
           expect(c.reuse, i > 0 && i != failed + 1, reason: c.source);
         }
@@ -1280,7 +1666,9 @@ import 'package:app/own.dart';
       expect(await runArgs(args), 0);
       final m = manifestOf('lib');
       expect(m['label'], '//app:lib');
-      expect(m['package'], 'app');
+      expect(m['packages'], [
+        {'name': 'app', 'package_root': 'app'},
+      ]);
       final modules = (m['modules'] as List).cast<Map<String, dynamic>>();
       expect(modules.map((m) => m['status']), ['unsupported', 'failed']);
       expect(modules.map((m) => m['dill']), [null, null]);
@@ -1322,6 +1710,33 @@ import 'package:app/own.dart';
       },
     );
 
+    test(
+      'module fails, without compiling, a module that names a file: URI',
+      () async {
+        write('root/app/pc.json', _packageConfig);
+        final args = moduleArgs('lib', {
+          'app/lib/a.dart': "part 'file:///elsewhere/p.dart';",
+          'app/lib/b.dart':
+              "import 'dart:core' if (dart.library.nowhere) "
+              "'file:///elsewhere/c.dart';",
+        });
+        expect(await runArgs(args), 0);
+        final modules = (manifestOf('lib')['modules'] as List)
+            .cast<Map<String, dynamic>>();
+        expect(modules.map((m) => m['status']), ['failed', 'failed']);
+        expect(
+          modules.first['reason'],
+          "names 'file:///elsewhere/p.dart' (in package:app/a.dart), a file: "
+          'URI, which the compiler would read from outside the inputs the '
+          'build declares',
+        );
+        expect(
+          modules.last['reason'],
+          contains("names 'file:///elsewhere/c.dart' (in package:app/b.dart)"),
+        );
+      },
+    );
+
     List<String> checkArgs(
       Map<String, String> sources, {
       List<String> depFiles = const [],
@@ -1336,7 +1751,7 @@ import 'package:app/own.dart';
         path('root/app/pc.json'),
         '--package-name',
         'app',
-        '--lib-root',
+        '--package-root',
         'app',
         '--multi-root',
         path('root'),
@@ -1537,6 +1952,108 @@ import 'b.dart' if (dart.library.html) 'package:dep/web.dart';
       expect(File(path('t.program.dill')).readAsStringSync(), 'ENTRYB0A0');
     });
 
+    test('link --list-short-path lists the entry first, then the selected modules, '
+        'each by its path from the list in runfiles', () async {
+      final a = _manifest('//a:a', [
+        _module(0, ['package:a/a.dart']),
+        _module(1, ['package:a/b.dart']),
+      ]);
+      final b = _manifest('@dep//b:b', [
+        _module(0, ['package:b/b.dart']),
+      ]);
+      write('a.modules.json', a.toJson());
+      write('b.modules.json', b.toJson());
+      write(
+        'selection.json',
+        jsonEncode({
+          'modules': [
+            {'label': '@dep//b:b', 'id': 0},
+            {'label': '//a:a', 'id': 0},
+          ],
+        }),
+      );
+      // No kernel exists: a list needs none of their bytes.
+      final code = await runArgs([
+        'link',
+        '--label',
+        '//app/t:t',
+        '--selection',
+        path('selection.json'),
+        '--dep-manifest',
+        path('a.modules.json'),
+        '--dep-short-path',
+        'a/a.modules',
+        '--dep-manifest',
+        path('b.modules.json'),
+        '--dep-short-path',
+        '../dep+/b/b.modules',
+        '--workspace-name',
+        '_main',
+        '--list-short-path',
+        'app/t/t.dill',
+        '--entry-short-path',
+        'app/t/t.entry.dill',
+        '--output',
+        path('t.dill'),
+      ]);
+      expect(code, 0);
+      expect(
+        File(path('t.dill')).readAsStringSync(),
+        '#@dill\n'
+        't.entry.dill\n'
+        '../../../dep+/b/b.modules/0.dill\n'
+        '../../a/a.modules/0.dill\n',
+      );
+    });
+
+    test(
+      'link --list-short-path still refuses a library two modules define',
+      () async {
+        final a = _manifest('//a:a', [
+          _module(0, ['package:x/x.dart']),
+        ]);
+        final b = _manifest('//b:b', [
+          _module(0, ['package:x/x.dart']),
+        ]);
+        write('a.modules.json', a.toJson());
+        write('b.modules.json', b.toJson());
+        write(
+          'selection.json',
+          jsonEncode({
+            'modules': [
+              {'label': '//a:a', 'id': 0},
+              {'label': '//b:b', 'id': 0},
+            ],
+          }),
+        );
+        final code = await runArgs([
+          'link',
+          '--label',
+          '//app:t',
+          '--selection',
+          path('selection.json'),
+          '--dep-manifest',
+          path('a.modules.json'),
+          '--dep-short-path',
+          'a/a.modules',
+          '--dep-manifest',
+          path('b.modules.json'),
+          '--dep-short-path',
+          'b/b.modules',
+          '--workspace-name',
+          '_main',
+          '--list-short-path',
+          'app/t.dill',
+          '--entry-short-path',
+          'app/t.entry.dill',
+          '--output',
+          path('t.dill'),
+        ]);
+        expect(code, 1);
+        expect(File(path('t.dill')).existsSync(), isFalse);
+      },
+    );
+
     test('link refuses a library two selected modules define', () async {
       final a = _manifest('//a:a', [
         _module(0, ['package:x/x.dart']),
@@ -1619,7 +2136,7 @@ class _FakeKernelWorker extends KernelWorker {
       source: source,
       reuse: arguments.contains('--reuse-compiler-result'),
     ));
-    if (source.endsWith(fails)) return (exitCode: 15, output: 'Error: no');
+    if (source.endsWith(fails)) return (exitCode: 254, output: 'Error: no');
     File(arguments[arguments.indexOf('--output') + 1]).writeAsStringSync('');
     return (exitCode: 0, output: '');
   }

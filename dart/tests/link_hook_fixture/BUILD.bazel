@@ -2,30 +2,56 @@
 
 Nothing here is built — every target an assertion reads is tagged `manual` —
 so the hook is never run and no binary is compiled. The behaviour the hooks
-produce is `e2e/link_hook`'s to show.
+produce is `e2e/examples/native_hooks`'s to show.
 """
 
-load("//dart:defs.bzl", "dart_binary", "dart_code_asset", "dart_library", "dart_link_hook")
+load("//dart:defs.bzl", "dart_binary", "dart_code_asset", "dart_data_asset", "dart_library", "dart_package_metadata", "dart_program_assets")
 load(
     "//dart/tests:link_hook_test.bzl",
-    "asset_without_hook_test",
+    "assets_action_args_test",
+    "assets_without_cpp",
     "empty_recording_binary_test",
+    "known_asset",
+    "known_asset_test",
     "library_records_link_hook_test",
     "link_hook_actions_test",
-    "malformed_asset_id_test",
-    "misplaced_link_hook_test",
+    "link_hook_code_assets_test",
+    "link_hook_data_assets_test",
+    "native_link_test",
     "not_recording_binary_test",
+    "nothing_read_test",
+    "own_package_not_named_test",
+    "read_assets",
     "recorded_uses_not_json_test",
     "recording_binary_test",
+    "unknown_asset_test",
+    "unknown_code_view_test",
+    "unlinked_assets_test",
     "validation_runs_assetless_hook_test",
+    "without_cpp_test",
 )
 load("//dart/tests:path_mapping_test.bzl", "path_mapping_test")
 
+# What the package's build hook would route to its link hook.
+dart_data_asset(
+    name = "raw",
+    src = "raw.json",
+    asset_id = "package:link_hook_fixture/data/raw.json",
+    tags = ["manual"],
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "link_hook_fixture",
+    data_assets = [":raw"],
+    link_hook = "hook/link.dart",
+    link_hook_assets = ["package:link_hook_fixture/data/index.json"],
+)
+
 dart_library(
     name = "lib",
-    package_name = "link_hook_fixture",
     srcs = ["lib/fixture.dart"],
-    link_hook = "hook/link.dart",
+    package = ":pubspec-metadata",
     deps = ["//dart/tests/link_hook_fixture/dep"],
 )
 
@@ -34,20 +60,6 @@ library_records_link_hook_test(
     package_name = "link_hook_fixture",
     size = "small",
     target_under_test = ":lib",
-)
-
-dart_library(
-    name = "misplaced",
-    package_name = "link_hook_fixture",
-    srcs = ["lib/fixture.dart"],
-    link_hook = "misplaced/link.dart",
-    tags = ["manual"],
-)
-
-misplaced_link_hook_test(
-    name = "misplaced_link_hook_test",
-    size = "small",
-    target_under_test = ":misplaced",
 )
 
 # --- dart_binary(record_use) ---
@@ -81,12 +93,12 @@ recording_binary_test(
     target_under_test = ":aot",
 )
 
-# With a code asset the front end runs in gen_kernel; recording still happens
+# With a code asset the front end gets a native-assets mapping; recording still happens
 # in the `dart compile` that tree-shakes the resulting kernel.
 dart_code_asset(
     name = "asset",
     asset_id = "package:link_hook_fixture/src/ffi.g.dart",
-    shared_library = "//dart/tests/cc_fixture:empty_shared",
+    file = "//dart/tests/cc_fixture:empty_shared",
     tags = ["manual"],
 )
 
@@ -133,11 +145,10 @@ not_recording_binary_test(
     target_under_test = ":plain",
 )
 
-# --- dart_link_hook ---
+# --- dart_program_assets ---
 
-dart_link_hook(
+dart_program_assets(
     name = "linked",
-    data_assets = ["package:link_hook_fixture/data/index.json"],
     recorded_uses = ":exe",
     tags = ["manual"],
     deps = [":lib"],
@@ -150,11 +161,273 @@ link_hook_actions_test(
     target_under_test = ":linked",
 )
 
-dart_link_hook(
+# The hook's package is the program's own, and no library of it is in `deps`:
+# its hook runs as a dependency's would.
+dart_program_assets(
+    name = "linked_own_package",
+    package = ":pubspec-metadata",
+    recorded_uses = "uses.json",
+    tags = ["manual"],
+    deps = ["//dart/tests/link_hook_fixture/dep"],
+)
+
+link_hook_actions_test(
+    name = "link_hook_own_package_actions_test",
+    size = "small",
+    recorded_uses_basename = "uses.json",
+    target_under_test = ":linked_own_package",
+)
+
+# The hook receives its package's declared data asset; the declared asset of
+# the package without a hook ships beside what the hook emits.
+dart_program_assets(
+    name = "linked_with_data",
+    recorded_uses = "uses.json",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//dart/tests/link_hook_fixture/plain_data",
+    ],
+)
+
+link_hook_data_assets_test(
+    name = "link_hook_data_assets_test",
+    size = "small",
+    target_under_test = ":linked_with_data",
+)
+
+# The same, with the hook's package the program's own and no library of it in
+# `deps`: its assets are the hook's input as a dependency's would be.
+dart_program_assets(
+    name = "linked_own_package_with_data",
+    package = ":pubspec-metadata",
+    recorded_uses = "uses.json",
+    tags = ["manual"],
+    deps = [
+        "//dart/tests/link_hook_fixture/dep",
+        "//dart/tests/link_hook_fixture/plain_data",
+    ],
+)
+
+link_hook_data_assets_test(
+    name = "link_hook_own_package_data_assets_test",
+    size = "small",
+    target_under_test = ":linked_own_package_with_data",
+)
+
+# The hook receives its package's code asset, with the target it is built
+# for; whether it ships is the hook's to say, so it is not known.
+dart_program_assets(
+    name = "linked_with_code",
+    recorded_uses = "uses.json",
+    tags = ["manual"],
+    deps = ["//dart/tests/link_hook_fixture/coded"],
+)
+
+link_hook_code_assets_test(
+    name = "link_hook_code_assets_test",
+    size = "small",
+    target_under_test = ":linked_with_code",
+)
+
+# An action given the program's assets with `program_assets_action_args()`:
+# one flag, one param file holding what the action reads, every file it names
+# an input and no other: all of them; the data alone; the code alone, with its
+# libraries or by name, where a hook's selection is an input and its
+# libraries are not.
+VIEWS = [
+    # (suffix, data, code)
+    ("", True, "libraries"),
+    ("_data", True, "none"),
+    ("_code", False, "libraries"),
+    ("_code_names", False, "names"),
+]
+
+[
+    read_assets(
+        name = name + view + "_read",
+        assets = ":" + name,
+        code = code,
+        data = data,
+        tags = ["manual"],
+    )
+    for name in [
+        "linked_with_code",
+        "linked_with_data",
+    ]
+    for view, data, code in VIEWS
+]
+
+[
+    assets_action_args_test(
+        name = "linked_with_code%s_action_args_test" % view,
+        size = "small",
+        assets = ":linked_with_code",
+        code = code,
+        data = data,
+        expected_candidates = ["package:link_hook_coded/native"],
+        target_under_test = ":linked_with_code%s_read" % view,
+    )
+    for view, data, code in VIEWS
+]
+
+[
+    assets_action_args_test(
+        name = "linked_with_data%s_action_args_test" % view,
+        size = "small",
+        assets = ":linked_with_data",
+        code = code,
+        data = data,
+        expected_data = [
+            "package:link_hook_fixture/data/index.json",
+            "package:plain_data/banner.txt",
+        ],
+        target_under_test = ":linked_with_data%s_read" % view,
+    )
+    for view, data, code in VIEWS
+]
+
+# A tool handed nothing, or a code view that does not exist, is refused.
+read_assets(
+    name = "nothing_read",
+    assets = ":linked_with_data",
+    code = "none",
+    data = False,
+    tags = ["manual"],
+)
+
+nothing_read_test(
+    name = "nothing_read_test",
+    size = "small",
+    target_under_test = ":nothing_read",
+)
+
+read_assets(
+    name = "unknown_code_view_read",
+    assets = ":linked_with_data",
+    code = "bytes",
+    tags = ["manual"],
+)
+
+unknown_code_view_test(
+    name = "unknown_code_view_test",
+    size = "small",
+    target_under_test = ":unknown_code_view_read",
+)
+
+# Native code linked into each program: over the program's uses when linked,
+# whole when not. A rule that cannot link it says what to declare.
+dart_program_assets(
+    name = "linked_native",
+    recorded_uses = "uses.json",
+    tags = ["manual"],
+    deps = ["//dart/tests/link_hook_fixture/native:native_lib"],
+)
+
+native_link_test(
+    name = "native_link_test",
+    size = "small",
+    linked = True,
+    target_under_test = ":linked_native",
+)
+
+dart_program_assets(
+    name = "unlinked_native",
+    tags = ["manual"],
+    deps = ["//dart/tests/link_hook_fixture/native:native_lib"],
+)
+
+native_link_test(
+    name = "unlinked_native_link_test",
+    size = "small",
+    target_under_test = ":unlinked_native",
+)
+
+assets_without_cpp(
+    name = "native_without_cpp",
+    tags = ["manual"],
+    deps = ["//dart/tests/link_hook_fixture/native:native_lib"],
+)
+
+without_cpp_test(
+    name = "without_cpp_test",
+    size = "small",
+    target_under_test = ":native_without_cpp",
+)
+
+# Not linked: every declared asset ships, the hook's package's among them.
+dart_program_assets(
+    name = "unlinked_with_data",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//dart/tests/link_hook_fixture/plain_data",
+    ],
+)
+
+unlinked_assets_test(
+    name = "unlinked_assets_test",
+    size = "small",
+    target_under_test = ":unlinked_with_data",
+)
+
+# The promised asset is known at analysis time; one the hook may or may not
+# emit is not, and naming it says what to change.
+known_asset(
+    name = "known_index",
+    asset_id = "package:link_hook_fixture/data/index.json",
+    assets = ":linked_with_data",
+    tags = ["manual"],
+)
+
+known_asset_test(
+    name = "known_asset_test",
+    size = "small",
+    target_under_test = ":known_index",
+)
+
+known_asset(
+    name = "unknown_raw",
+    asset_id = "package:link_hook_fixture/data/raw.json",
+    assets = ":linked_with_data",
+    tags = ["manual"],
+)
+
+unknown_asset_test(
+    name = "unknown_asset_test",
+    size = "small",
+    target_under_test = ":unknown_raw",
+)
+
+# A program in the package, linked without naming it: its hook would not run.
+dart_binary(
+    name = "own_exe",
+    main = "main.dart",
+    package = ":pubspec-metadata",
+    record_use = True,
+    tags = ["manual"],
+    deps = [":lib"],
+)
+
+dart_program_assets(
+    name = "own_package_not_named",
+    recorded_uses = ":own_exe",
+    tags = ["manual"],
+    deps = [":lib"],
+)
+
+own_package_not_named_test(
+    name = "own_package_not_named_test",
+    size = "small",
+    target_under_test = ":own_package_not_named",
+)
+
+# A hook whose package promises no `link_hook_assets`.
+dart_program_assets(
     name = "linked_from_file",
     recorded_uses = "uses.json",
     tags = ["manual"],
-    deps = [":lib"],
+    deps = ["//dart/tests/link_hook_fixture/assetless"],
 )
 
 validation_runs_assetless_hook_test(
@@ -163,35 +436,7 @@ validation_runs_assetless_hook_test(
     target_under_test = ":linked_from_file",
 )
 
-dart_link_hook(
-    name = "asset_without_hook",
-    data_assets = ["package:link_hook_fixture_dep/x.json"],
-    recorded_uses = "uses.json",
-    tags = ["manual"],
-    deps = [":lib"],
-)
-
-asset_without_hook_test(
-    name = "asset_without_hook_test",
-    size = "small",
-    target_under_test = ":asset_without_hook",
-)
-
-dart_link_hook(
-    name = "malformed_asset_id",
-    data_assets = ["link_hook_fixture/x.json"],
-    recorded_uses = "uses.json",
-    tags = ["manual"],
-    deps = [":lib"],
-)
-
-malformed_asset_id_test(
-    name = "malformed_asset_id_test",
-    size = "small",
-    target_under_test = ":malformed_asset_id",
-)
-
-dart_link_hook(
+dart_program_assets(
     name = "recorded_uses_not_json",
     recorded_uses = ":plain",
     tags = ["manual"],

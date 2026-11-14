@@ -1,41 +1,15 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@bazel_skylib//rules:common_settings.bzl", "string_list_setting")
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_setting", "string_list_setting", "string_setting")
 load(":dart_analyze_aspect.bzl", "dart_analysis_config")
-load(":dart_module.bzl", "vm_kernel_sdk")
+load(":dart_module.bzl", "vm_kernel_sdk", "vm_program_kernel_sdk")
+load(":dart_summary.bzl", "summary_analyzer")
+load(":runtime.bzl", "target_runtime")
 
+# The `package_metadata` module's purl builder, which ships no `bzl_library`.
+# keep
 bzl_library(
-    name = "toolchains_repo",
-    srcs = ["toolchains_repo.bzl"],
-    visibility = ["//dart:__subpackages__"],
-)
-
-bzl_library(
-    name = "versions",
-    srcs = ["versions.bzl"],
-    visibility = ["//dart:__subpackages__"],
-)
-
-bzl_library(
-    name = "toolchain_selection",
-    srcs = ["toolchain_selection.bzl"],
-    visibility = ["//dart:__subpackages__"],
-)
-
-bzl_library(
-    name = "resolved_toolchain",
-    srcs = ["resolved_toolchain.bzl"],
-    visibility = ["//dart:__subpackages__"],
-)
-
-bzl_library(
-    name = "exec_groups",
-    srcs = ["exec_groups.bzl"],
-    visibility = ["//dart:__subpackages__"],
-)
-
-bzl_library(
-    name = "resources",
-    srcs = ["resources.bzl"],
+    name = "purl",
+    srcs = ["@package_metadata//purl:srcs"],
     visibility = ["//dart:__subpackages__"],
 )
 
@@ -46,9 +20,21 @@ bzl_library(
     deps = [
         ":dart_info",
         ":exec_groups",
+        ":package_root",
         ":resources",
         ":source_set",
         "//dart:providers",
+        "//dart/ext:registry",
+    ],
+)
+
+bzl_library(
+    name = "dart_coverage",
+    srcs = ["dart_coverage.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_info",
     ],
 )
 
@@ -66,7 +52,10 @@ bzl_library(
     name = "dart_info",
     srcs = ["dart_info.bzl"],
     visibility = ["//dart:__subpackages__"],
-    deps = ["//dart:providers"],
+    deps = [
+        ":package_info",
+        "//dart:providers",
+    ],
 )
 
 bzl_library(
@@ -74,7 +63,14 @@ bzl_library(
     srcs = ["dart_library.bzl"],
     visibility = ["//dart:__subpackages__"],
     deps = [
+        ":common",
+        ":dart_import_check",
         ":dart_info",
+        ":dart_summary",
+        ":exec_groups",
+        ":package_root",
+        ":runtime",
+        ":source_set",
         "//dart:providers",
     ],
 )
@@ -100,7 +96,10 @@ bzl_library(
     name = "package_config",
     srcs = ["package_config.bzl"],
     visibility = ["//dart:__subpackages__"],
-    deps = ["//dart:providers"],
+    deps = [
+        ":common",
+        "//dart:providers",
+    ],
 )
 
 bzl_library(
@@ -111,21 +110,42 @@ bzl_library(
         ":build_settings",
         ":common",
         ":dart_compile",
+        ":dart_import_check",
+        ":dart_module",
         ":exec_groups",
         ":executable_package",
+        ":program_assets",
+        ":runtime",
         ":source_set",
         "//dart:providers",
     ],
 )
 
 bzl_library(
-    name = "dart_link_hook",
-    srcs = ["dart_link_hook.bzl"],
+    name = "program_assets",
+    srcs = ["program_assets.bzl"],
     visibility = ["//dart:__subpackages__"],
     deps = [
         ":common",
+        ":dart_info",
         ":exec_groups",
+        ":package_info",
+        ":project_staging",
+        ":source_set",
         "//dart:providers",
+        "@rules_cc//cc:find_cc_toolchain",
+        "@rules_cc//cc/common:cc_common",
+    ],
+)
+
+bzl_library(
+    name = "dart_linked_code_asset",
+    srcs = ["dart_linked_code_asset.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":package_info",
+        ":runtime",
+        "@rules_cc//cc/common:cc_info",
     ],
 )
 
@@ -141,16 +161,24 @@ bzl_library(
     ],
 )
 
+# Kept by hand: Gazelle's bzl plugin skips a file named `*_test.bzl`, taking it
+# for a test.
 bzl_library(
     name = "dart_test",
-    srcs = ["dart_test.bzl"],
+    srcs = ["dart_test.bzl"],  # keep
     visibility = ["//dart:__subpackages__"],
     deps = [
         ":build_settings",
         ":common",
         ":dart_compile",
+        ":dart_coverage",
+        ":dart_import_check",
+        ":dart_module",
+        ":dart_test_runner",
         ":exec_groups",
         ":executable_package",
+        ":program_assets",
+        ":project_staging",
         ":source_set",
         "//dart:providers",
     ],
@@ -170,25 +198,27 @@ bzl_library(
     name = "project_staging",
     srcs = ["project_staging.bzl"],
     visibility = ["//dart:__subpackages__"],
-    deps = [":source_set"],
-)
-
-bzl_library(
-    name = "dart_fix",
-    srcs = ["dart_fix.bzl"],
-    visibility = ["//dart:__subpackages__"],
     deps = [
         ":common",
-        ":dart_analyze_aspect",
+        ":source_set",
     ],
 )
 
 bzl_library(
-    name = "dart_analyze_aspect",
-    srcs = ["dart_analyze_aspect.bzl"],
+    name = "apply_changes",
+    srcs = ["apply_changes.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [":dart_binary"],
+)
+
+bzl_library(
+    name = "dart_summary",
+    srcs = ["dart_summary.bzl"],
     visibility = ["//dart:__subpackages__"],
     deps = [
         ":common",
+        ":dart_info",
+        ":exec_groups",
         ":project_staging",
         ":resources",
         ":source_set",
@@ -198,24 +228,33 @@ bzl_library(
 )
 
 bzl_library(
+    name = "dart_analyze_aspect",
+    srcs = ["dart_analyze_aspect.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_info",
+        ":dart_summary",
+        ":exec_groups",
+        ":project_staging",
+        ":resources",
+        ":source_set",
+        "//dart:providers",
+        "@bazel_skylib//rules:common_settings",
+    ],
+)
+
+# Kept by hand: Gazelle's bzl plugin skips a file named `*_test.bzl`, taking it
+# for a test.
+bzl_library(
     name = "dart_analysis_test",
-    srcs = ["dart_analysis_test.bzl"],
+    srcs = ["dart_analysis_test.bzl"],  # keep
     visibility = ["//dart:__subpackages__"],
     deps = [
         ":common",
         ":dart_analyze_aspect",
         ":exec_groups",
-    ],
-)
-
-bzl_library(
-    name = "dart_format",
-    srcs = ["dart_format.bzl"],
-    visibility = ["//dart:__subpackages__"],
-    deps = [
-        ":common",
-        ":dart_analyze_aspect",
-        ":source_set",
+        ":runtime",
     ],
 )
 
@@ -229,7 +268,180 @@ bzl_library(
         ":exec_groups",
         ":executable_package",
         ":project_staging",
+        ":runtime",
         ":source_set",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "dart_codegen",
+    srcs = ["dart_codegen.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":codegen_deps",
+        ":codegen_sdk_summary",
+        ":common",
+        ":exec_groups",
+        ":runtime",
+    ],
+)
+
+bzl_library(
+    name = "dart_aggregate_codegen",
+    srcs = ["dart_aggregate_codegen.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":codegen_deps",
+        ":codegen_sdk_summary",
+        ":common",
+        ":exec_groups",
+        ":runtime",
+    ],
+)
+
+dart_analysis_config(
+    name = "empty_analysis_config",
+    visibility = ["//visibility:public"],
+)
+
+# An executable's environment, carried to its dependencies' kernel modules by
+# the transition of `executable_defines_config`. Not a flag:
+# `--@rules_dart//dart:extra_dart_defines` is the command-line way in.
+# `scope = "target"` keeps it out of the exec configuration, as that flag.
+string_list_setting(
+    name = "module_defines",
+    build_setting_default = [],
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Whether a `dart_library` checks its own imports. Not a flag: only
+# `without_import_check` turns it off, for the libraries `kernel_tool`, which
+# runs the check, is built from.
+bool_setting(
+    name = "import_check",
+    build_setting_default = True,
+)
+
+config_setting(
+    name = "without_import_check",
+    flag_values = {":import_check": "False"},
+)
+
+# A target with no executable, which `library_import_check` reads as nothing to
+# check with.
+filegroup(name = "no_import_checker")
+
+alias(
+    name = "import_checker",
+    actual = select({
+        ":without_import_check": ":no_import_checker",
+        "//conditions:default": "//dart/private/tools:kernel_tool",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# The summary analyzer of the resolved Dart SDK, and that SDK's summary, for
+# `--@rules_dart//dart:analysis_summaries`.
+summary_analyzer(
+    name = "summary_analyzer",
+    enabled = select({
+        "//dart:is_analysis_summaries": True,
+        "//conditions:default": False,
+    }),
+    visibility = ["//visibility:public"],
+)
+
+vm_kernel_sdk(
+    name = "vm_kernel_sdk",
+    outlines = select({
+        "//dart:is_outline_kernel": True,
+        "//conditions:default": False,
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# What executables compile their whole program with. It resolves no outline
+# toolchain, whose stripper is itself a `dart_binary`.
+vm_program_kernel_sdk(
+    name = "vm_program_kernel_sdk",
+    visibility = ["//visibility:public"],
+)
+
+# `--platforms` as it was before the nearest web transition, JSON-encoded; ""
+# outside one. The web transitions set it and `runtime_reset` restores
+# `--platforms` from it and clears it (runtime.bzl). `scope = "target"`
+# keeps it out of the exec configuration.
+string_setting(
+    name = "platforms_before_web",
+    build_setting_default = "",
+    scope = "target",
+    visibility = ["//visibility:public"],
+)
+
+# Which runtime a configuration's target platform carries; the web
+# binaries read it through their transition.
+target_runtime(
+    name = "target_runtime",
+    visibility = ["//visibility:public"],
+)
+
+# `deps` kept by hand: Gazelle's bzl plugin guesses an external file's
+# bzl_library from its name, and rules_cc names this one `_bzl`.
+bzl_library(
+    name = "dart_code_asset",
+    srcs = ["dart_code_asset.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":runtime",
+        "//dart:providers",
+        "@rules_cc//cc/common:cc_shared_library_info_bzl",
+    ],  # keep
+)
+
+bzl_library(
+    name = "dart_deps",
+    srcs = ["dart_deps.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = ["//dart:providers"],
+)
+
+bzl_library(
+    name = "dart_import_check",
+    srcs = ["dart_import_check.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_deps",
+        ":dart_module",
+        ":exec_groups",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "dart_module",
+    srcs = ["dart_module.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":build_settings",
+        ":common",
+        ":dart_deps",
+        ":exec_groups",
+        ":resources",
+        "//dart:providers",
+        "@bazel_skylib//rules:common_settings",
+    ],
+)
+
+bzl_library(
+    name = "dart_package_metadata",
+    srcs = ["dart_package_metadata.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":dart_info",
+        ":package_root",
         "//dart:providers",
     ],
 )
@@ -238,36 +450,136 @@ bzl_library(
     name = "dart_sdk_binary",
     srcs = ["dart_sdk_binary.bzl"],
     visibility = ["//dart:__subpackages__"],
+    deps = [":common"],
 )
 
 bzl_library(
-    name = "dart_codegen",
-    srcs = ["dart_codegen.bzl"],
+    name = "dart_sqlcodegen",
+    srcs = ["dart_sqlcodegen.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":codegen_deps",
+        ":codegen_sdk_summary",
+        ":common",
+        ":dart_library",
+        ":exec_groups",
+        ":runtime",
+    ],
+)
+
+bzl_library(
+    name = "dart_test_runner",
+    srcs = ["dart_test_runner.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_binary",
+        ":dart_module",
+        ":exec_groups",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "dart_data_asset",
+    srcs = ["dart_data_asset.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":runtime",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "dart_package_cycle",
+    srcs = ["dart_package_cycle.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_import_check",
+        ":dart_library",
+        ":dart_summary",
+        ":exec_groups",
+        ":runtime",
+        ":source_set",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "codegen_sdk_summary",
+    srcs = ["codegen_sdk_summary.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":exec_groups",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "codegen_deps",
+    srcs = ["codegen_deps.bzl"],
+    visibility = ["//dart:__subpackages__"],
+    deps = [
+        ":common",
+        ":dart_import_check",
+        ":dart_info",
+        ":dart_package_cycle",
+        "//dart:providers",
+    ],
+)
+
+bzl_library(
+    name = "exec_groups",
+    srcs = ["exec_groups.bzl"],
     visibility = ["//dart:__subpackages__"],
 )
 
 bzl_library(
-    name = "dart_aggregate_codegen",
-    srcs = ["dart_aggregate_codegen.bzl"],
+    name = "package_info",
+    srcs = ["package_info.bzl"],
     visibility = ["//dart:__subpackages__"],
-    deps = ["//dart:providers"],
 )
 
-dart_analysis_config(
-    name = "empty_analysis_config",
-    visibility = ["//visibility:public"],
+bzl_library(
+    name = "package_root",
+    srcs = ["package_root.bzl"],
+    visibility = ["//dart:__subpackages__"],
 )
 
-# A test's own `defines`, carried to its dependencies' kernel modules by
-# `module_defines_transition`. Not a flag: `--@rules_dart//dart:extra_dart_defines`
-# is the command-line way in.
-string_list_setting(
-    name = "module_defines",
-    build_setting_default = [],
-    visibility = ["//visibility:public"],
+bzl_library(
+    name = "resolved_toolchain",
+    srcs = ["resolved_toolchain.bzl"],
+    visibility = ["//dart:__subpackages__"],
 )
 
-vm_kernel_sdk(
-    name = "vm_kernel_sdk",
-    visibility = ["//visibility:public"],
+bzl_library(
+    name = "resources",
+    srcs = ["resources.bzl"],
+    visibility = ["//dart:__subpackages__"],
+)
+
+bzl_library(
+    name = "runtime",
+    srcs = ["runtime.bzl"],
+    visibility = ["//dart:__subpackages__"],
+)
+
+bzl_library(
+    name = "toolchain_selection",
+    srcs = ["toolchain_selection.bzl"],
+    visibility = ["//dart:__subpackages__"],
+)
+
+bzl_library(
+    name = "toolchains_repo",
+    srcs = ["toolchains_repo.bzl"],
+    visibility = ["//dart:__subpackages__"],
+)
+
+bzl_library(
+    name = "versions",
+    srcs = ["versions.bzl"],
+    visibility = ["//dart:__subpackages__"],
 )

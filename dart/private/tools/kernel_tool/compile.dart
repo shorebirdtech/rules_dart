@@ -35,36 +35,22 @@ class Digests {
 /// Dart's forked child holding `kernel_worker`'s stdin open, so it never exits.
 const maxCompiles = 100;
 
-/// How long one module's compile may take before the action fails. A
-/// `kernel_worker` that stops answering would otherwise hold the action
-/// forever: nothing else puts a limit on a request. Far longer than any
-/// module takes, so only a compiler that has stopped reaches it.
-const compileDeadline = Duration(minutes: 10);
-
-/// `kernel_worker` gave no answer within [KernelWorker.deadline].
-class CompilerStalled implements Exception {
-  const CompilerStalled(this.deadline);
-
-  final Duration deadline;
-
-  @override
-  String toString() =>
-      'kernel_worker gave no answer in ${deadline.inSeconds} seconds';
-}
-
 /// A `kernel_worker` that stays up between modules, so the platform and the
 /// modules a compile reads are loaded once, not once per module. In a Bazel
 /// worker it stays up between targets too, and is restarted after
 /// [maxCompiles]; a restart costs a reload and changes no output, since what
 /// it reuses is keyed by digests.
 class KernelWorker {
-  KernelWorker(this.runtime, this.snapshot, {this.deadline = compileDeadline});
+  KernelWorker(this.runtime, this.snapshot);
 
   final String runtime;
   final String snapshot;
-  final Duration deadline;
 
   BazelWorkerDriver? _driver;
+
+  /// The compiler processes [_driver] started that have not yet exited, which
+  /// [close] waits out.
+  final _processes = <Process>[];
 
   /// Where the compiler process was started. Paths in a request are relative
   /// to the working directory, which a sandboxed worker has a new one of per
@@ -80,6 +66,8 @@ class KernelWorker {
         '--persistent_worker',
       ]);
       process.stderr.listen(stderr.add);
+      _processes.add(process);
+      unawaited(process.exitCode.then((_) => _processes.remove(process)));
       return process;
     },
     maxWorkers: 1,
@@ -90,8 +78,7 @@ class KernelWorker {
 
   /// Compiles with [arguments]. [inputs] are the files the compile reads that
   /// can change between requests, whose digests tell the worker what it may
-  /// reuse. Throws [CompilerStalled], after stopping the compiler, if it gives
-  /// no answer within [deadline].
+  /// reuse.
   Future<CompileResult> compile(
     List<String> arguments,
     List<String> inputs,
@@ -100,24 +87,16 @@ class KernelWorker {
     final here = Directory.current.path;
     if (_startedIn != here) await close();
     _startedIn = here;
-    final WorkResponse response;
-    try {
-      response = await (_driver ??= _start())
-          .doWork(
-            WorkRequest(
-              arguments: arguments,
-              inputs: [
-                for (final path in inputs)
-                  Input(path: path, digest: digests.of(path)),
-              ],
-              requestId: ++_requests,
-            ),
-          )
-          .timeout(deadline);
-    } on TimeoutException {
-      await close();
-      throw CompilerStalled(deadline);
-    }
+    final response = await (_driver ??= _start()).doWork(
+      WorkRequest(
+        arguments: arguments,
+        inputs: [
+          for (final path in inputs)
+            Input(path: path, digest: digests.of(path)),
+        ],
+        requestId: ++_requests,
+      ),
+    );
     if (++_compiles >= maxCompiles) await close();
     return (exitCode: response.exitCode, output: response.output);
   }
@@ -127,6 +106,11 @@ class KernelWorker {
     _driver = null;
     _compiles = 0;
     await driver?.terminateWorkers();
+    // Killing is not exiting: until it has, the process holds its working
+    // directory, which Windows will not delete.
+    await Future.wait([
+      for (final p in [..._processes]) p.exitCode,
+    ]);
   }
 }
 

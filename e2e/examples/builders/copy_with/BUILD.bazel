@@ -1,0 +1,40 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+load("@rules_dart//dart/ext/copy_with_extension_gen:defs.bzl", "copy_with_codegen")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "copy_with",
+    language_version = "3.11",
+)
+
+copy_with_codegen(
+    name = "copy_with_codegen",
+    srcs = ["lib/user.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "copy_with",
+    srcs = [
+        "lib/user.dart",
+        ":copy_with_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:copy_with_extension"],
+)
+
+dart_test(
+    name = "user_test",
+    size = "small",
+    main = "test/user_test.dart",
+    deps = [
+        ":copy_with",
+        "@pub_deps//:test",
+    ],
+)

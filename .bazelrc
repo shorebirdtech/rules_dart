@@ -25,12 +25,24 @@ common --lockfile_mode=error
 
 # Analyze and format-check every Dart target a test run names, under
 # //:analysis_config — the setup README.md asks of users. The options flag is
-# under `common` so that `bazel run` of a `dart_fix` or `dart_format` sees the
-# same options.
+# under `common` so that the build `bazel run //dart/format` and `//dart/fix`
+# run sees the same options.
 test --aspects=//dart:analyze.bzl%dart_analyze
 test --output_groups=+dart_analyze
 test --output_groups=+dart_format
 common --//dart:analysis_config=//:analysis_config
+
+# This repository's tests run on its own machines and CI, where the runner
+# snapshot cache is safe (README.md, "Faster tests and builds"). Set for
+# `build` so a `bazel run` of `//dart/format` or `//dart/fix`, whose nested
+# build reads this file, keeps the analysis cache a test run made.
+build --//dart:runner_snapshot
+
+# Tests tagged `deep` take minutes, or guard what only a toolchain bump can
+# break, and are left out by default. `--config=deep` runs them too: before a
+# merge, and in every Dart SDK bump (docs/CHORES.md).
+test --test_tag_filters=-deep
+test:deep --test_tag_filters=
 
 # Automatic execution groups: an action must name the toolchain its tools come
 # from, or run in an exec group. The rules support both settings; this

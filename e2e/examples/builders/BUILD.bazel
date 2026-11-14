@@ -1,0 +1,25 @@
+# Scenario matrix for the `dart/ext/` codegen pipeline. Each subpackage is
+# one shape: single SharedPart, macro form, multi-shard combining, two-stage
+# cascade, cross-file resolver/generator, PackageBuilder aggregate, etc.
+#
+# The BUILD files are written by hand, each to show its builder's rules and
+# macros; Gazelle's output for annotated sources is pinned by the plugin's
+# golden tests in dev/testdata.
+#
+# Run:      bazel test //builders/...
+
+load("@rules_dart//dart:defs.bzl", "dart_analysis_options")
+
+exports_files(["pubspec.lock"])
+
+# One ruleset shared by every subpackage, which the workspace's
+# `analysis_config` lists. The ruleset is named here rather than in any
+# `dart_library`'s `deps`: it is a lint-time input, and listing it as a
+# dependency would carry it into the `DartInfo` of every binary and test
+# downstream.
+dart_analysis_options(
+    name = "options",
+    src = "analysis_options.yaml",
+    visibility = ["//visibility:public"],
+    deps = ["@very_good_analysis"],
+)

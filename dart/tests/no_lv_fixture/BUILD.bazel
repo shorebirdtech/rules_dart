@@ -1,3 +1,4 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("//dart:defs.bzl", "dart_binary", "dart_test")
 load(":no_lv_rules.bzl", "no_lv_dart_library")
@@ -17,14 +18,26 @@ no_lv_dart_library(
 
 dart_binary(
     name = "no_lv_binary",
+    # Reaches the library for its provider, built the old way; its files
+    # import nothing of it.
+    features = ["-dart_unused_deps"],
     main = "main.dart",
+    # Compiled from an old provider; analysis of what reaches it is refused
+    # against summaries (`src_lib`).
+    tags = ["no-dart-analyze"],
     deps = [":no_lv_lib"],
 )
 
 dart_test(
     name = "no_lv_dart_test",
     size = "small",
+    # Reaches the library for its provider, built the old way; its files
+    # import nothing of it.
+    features = ["-dart_unused_deps"],
     main = "test.dart",
+    # Compiled from an old provider; analysis of what reaches it is refused
+    # against summaries (`src_lib`).
+    tags = ["no-dart-analyze"],
     deps = [":no_lv_lib"],
 )
 
@@ -36,4 +49,11 @@ build_test(
 build_test(
     name = "no_lv_dart_test_build_test",
     targets = [":no_lv_dart_test"],
+)
+
+bzl_library(
+    name = "no_lv_rules",
+    srcs = ["no_lv_rules.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart:providers"],
 )

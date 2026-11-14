@@ -1,0 +1,37 @@
+load("@rules_dart//dart:defs.bzl", "dart_binary", "dart_test")
+
+# Which directories are workspaces: //ci:check needs every one run by CI.
+exports_files(
+    ["lock_workspaces.dart"],
+    visibility = ["//ci:__pkg__"],
+)
+
+# `:check` checks and `:refresh` rewrites every workspace's MODULE.bazel.lock,
+# without the developer's `.bazelrc.user`. See locks_cli.dart.
+dart_binary(
+    name = "check",
+    srcs = [
+        "lock_workspaces.dart",
+        "locks_cli.dart",
+    ],
+    main = "check.dart",
+    visibility = ["//visibility:public"],
+)
+
+dart_binary(
+    name = "refresh",
+    srcs = [
+        "lock_workspaces.dart",
+        "locks_cli.dart",
+    ],
+    main = "refresh.dart",
+    visibility = ["//visibility:public"],
+)
+
+dart_test(
+    name = "lock_workspaces_test",
+    size = "small",
+    srcs = ["lock_workspaces.dart"],
+    main = "test/lock_workspaces_test.dart",
+    deps = ["@overhead_dev_deps//:test"],
+)

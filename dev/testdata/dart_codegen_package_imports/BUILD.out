@@ -1,0 +1,58 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata")
+load("@rules_dart//dart/ext/freezed:defs.bzl", "freezed_codegen")
+load("@rules_dart//dart/ext/json_serializable:defs.bzl", "json_serializable_codegen")
+
+# gazelle:dart_package_name imports
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "imports",
+    visibility = ["//:__subpackages__"],
+)
+
+freezed_codegen(
+    name = "role_codegen",
+    srcs = ["lib/role.dart"],
+    annotation_dep = "@freezed_annotation",
+    package = ":pubspec-metadata",
+    deps = ["@freezed_annotation"],
+)
+
+json_serializable_codegen(
+    name = "user_codegen",
+    srcs = ["lib/user.dart"],
+    annotation_dep = "@json_annotation",
+    asset_deps = [
+        "lib/imports.dart",
+        "lib/role.dart",
+        "lib/src/helper.dart",
+        ":role_codegen",
+    ],
+    package = ":pubspec-metadata",
+    deps = [
+        "@collection",
+        "@freezed_annotation",
+        "@json_annotation",
+        "@meta",
+    ],
+)
+
+dart_library(
+    name = "imports",
+    srcs = [
+        "lib/imports.dart",
+        "lib/role.dart",
+        "lib/src/helper.dart",
+        "lib/user.dart",
+        ":role_codegen",
+        ":user_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@collection",
+        "@freezed_annotation",
+        "@json_annotation",
+        "@meta",
+    ],
+)

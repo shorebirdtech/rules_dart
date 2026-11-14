@@ -1,7 +1,7 @@
 """A library rule whose Dart dependency comes from a toolchain, as `dart_proto_library`'s protobuf runtime does."""
 
-load("//dart:providers.bzl", "DartInfo")
-load("//dart:utils.bzl", "DART_TOOLCHAIN_TYPES_ATTR", "dart_info")
+load("//dart:providers.bzl", "DartInfo", "DartPackageInfo")
+load("//dart:utils.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "DART_TOOLCHAIN_TYPES_ATTR", "PORTABLE_EXEC_GROUPS", "SUMMARY_ATTRS", "dart_info")
 
 _TOOLCHAIN_TYPE = "//dart/tests/toolchain_dep_fixture:toolchain_type"
 
@@ -18,15 +18,18 @@ def _library_impl(ctx):
     return [
         DefaultInfo(files = depset(ctx.files.srcs)),
         dart_info(
-            label = ctx.label,
-            package_name = ctx.attr.package_name,
-            lib_root = ctx.label.package,
-            language_version = "3.11",
+            ctx = ctx,
+            packages = [DartPackageInfo(
+                label = ctx.label,
+                package_name = ctx.attr.package_name,
+                package_root = ctx.label.package,
+                language_version = "3.11",
+            )],
             deps = [runtime],
             srcs = ctx.files.srcs,
             # Its sources import the package the runtime is built on, as
             # generated code does, found by package in the runtime's own deps.
-            indirect_deps = [dep for dep, package in runtime[DartInfo].deps.items() if package == "toolchain_inner"],
+            indirect_deps = [dep for dep, packages in runtime[DartInfo].deps.items() if "toolchain_inner" in packages],
         ),
     ]
 
@@ -36,6 +39,7 @@ library_with_toolchain_runtime = rule(
         "srcs": attr.label_list(allow_files = [".dart"]),
         "package_name": attr.string(mandatory = True),
         DART_TOOLCHAIN_TYPES_ATTR: attr.label_list(default = [_TOOLCHAIN_TYPE]),
-    },
-    toolchains = [_TOOLCHAIN_TYPE],
+    } | SUMMARY_ATTRS,
+    exec_groups = PORTABLE_EXEC_GROUPS,
+    toolchains = [_TOOLCHAIN_TYPE] + COPY_TO_DIRECTORY_TOOLCHAINS,
 )

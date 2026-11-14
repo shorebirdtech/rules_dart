@@ -1,0 +1,59 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+load("@rules_dart//dart/ext/freezed:defs.bzl", "freezed_codegen")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "freezed_fixture",
+    language_version = "3.11",
+)
+
+# Comprehensive e2e for freezed_codegen:
+#  - basic value class (event.dart) — equality, copyWith, toString
+#  - sealed union (network_result.dart) — .when/.map/.maybeWhen,
+#    @Default, per-variant copyWith, variant equality
+
+freezed_codegen(
+    name = "freezed_codegen",
+    srcs = [
+        "lib/event.dart",
+        "lib/network_result.dart",
+    ],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "freezed_fixture",
+    srcs = [
+        "lib/event.dart",
+        "lib/network_result.dart",
+        ":freezed_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:freezed_annotation"],
+)
+
+dart_test(
+    name = "event_test",
+    size = "small",
+    main = "test/event_test.dart",
+    deps = [
+        ":freezed_fixture",
+        "@pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "network_result_test",
+    size = "small",
+    main = "test/network_result_test.dart",
+    deps = [
+        ":freezed_fixture",
+        "@pub_deps//:test",
+    ],
+)

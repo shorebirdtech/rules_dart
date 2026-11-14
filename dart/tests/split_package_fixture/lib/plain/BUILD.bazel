@@ -1,0 +1,9 @@
+load("//dart:defs.bzl", "dart_library")
+
+# One directory of `split_pkg`.
+dart_library(
+    name = "plain",
+    srcs = ["plain.dart"],
+    package = "//dart/tests/split_package_fixture:pubspec-metadata",
+    visibility = ["//dart/tests/split_package_fixture:__pkg__"],
+)

@@ -1,0 +1,9 @@
+load("//dart:defs.bzl", "dart_library")
+
+# Named after the package root, as its sibling in `../util` is.
+dart_library(
+    name = "model",
+    srcs = ["model.dart"],
+    visibility = ["//dart/tests/subdir_package_fixture:__subpackages__"],
+    deps = ["//dart/tests/subdir_package_fixture/lib/src/util"],
+)

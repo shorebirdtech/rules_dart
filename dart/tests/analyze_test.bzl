@@ -3,8 +3,8 @@
 The aspect's verdicts are checked by building it: `analyzed_test` and
 `formatted_test` apply it to one target and pass only if that target's analysis
 or format check ran and came back clean. Its red paths live in
-`e2e/analysis_failure`, where CI asserts each build fails with the expected
-diagnostic. The analysis tests here pin which targets the aspect takes on at
+`e2e/examples/fixtures/analysis_failure`, where CI asserts each build fails
+with the expected diagnostic. The analysis tests here pin which targets the aspect takes on at
 all.
 
 The rest of this file covers an executable. A `dart_binary`/`dart_test`
@@ -15,8 +15,8 @@ provider carrying it is still not something `deps` will accept.
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("//dart:providers.bzl", "DartAnalyzableInfo", "DartInfo")
-load("//dart/private:common.bzl", "test_executable")
-load("//dart/private:dart_analyze_aspect.bzl", "DartFixOutputsInfo", "dart_analyze")
+load("//dart/private:common.bzl", "launcher_executable")
+load("//dart/private:dart_analyze_aspect.bzl", "dart_analyze")
 
 # The fixture's entrypoint and its dependency, by the suffix of their
 # `short_path`. Named here rather than passed in: these tests exist for one
@@ -29,7 +29,7 @@ def _checked_test_impl(group):
         groups = ctx.attr.target[OutputGroupInfo] if OutputGroupInfo in ctx.attr.target else None
         if groups == None or not hasattr(groups, group):
             fail("%s: the dart_analyze aspect has no %s check for %s" % (ctx.label, group, ctx.attr.target.label))
-        noop = test_executable(ctx, ctx.attr._tool)
+        noop = launcher_executable(ctx, ctx.attr._tool)
         return [DefaultInfo(
             executable = noop.executable,
             runfiles = ctx.runfiles(transitive_files = getattr(groups, group)).merge(noop.runfiles),
@@ -63,6 +63,14 @@ formatted_test = rule(
     test = True,
 )
 
+# Passes when the fixes `@rules_dart//dart/fix` would write for `target` can be
+# computed.
+fixable_test = rule(
+    implementation = _checked_test_impl("dart_fix_changes"),
+    attrs = _CHECKED_TEST_ATTRS,
+    test = True,
+)
+
 def _aspect_applies_test_impl(ctx):
     env = analysistest.begin(ctx)
     target = analysistest.target_under_test(env)
@@ -87,13 +95,13 @@ def _aspect_applies_test_impl(ctx):
     asserts.equals(
         env,
         ctx.attr.expect_fixable,
-        DartFixOutputsInfo in target,
-        "whether `dart_fix` can fix %s" % target.label,
+        groups != None and hasattr(groups, "dart_fix_changes"),
+        "whether `@rules_dart//dart/fix` can fix %s" % target.label,
     )
     return analysistest.end(env)
 
-# Whether the aspect analyzes a target, format-checks it, and offers `dart_fix`
-# fixes for it: none for a target with nothing hand-written of its own, and
+# Whether the aspect analyzes a target, format-checks it, and offers fixes for
+# it: none for a target with nothing hand-written of its own, and
 # each opt-out tag removes its own check and nothing else.
 aspect_applies_test = analysistest.make(
     _aspect_applies_test_impl,
@@ -142,11 +150,11 @@ def _analyzable_provider_test_impl(ctx):
 
     # The entrypoint, which no `DartInfo` can carry: it is under no package's
     # `lib/`, so no `DartPackageInfo` names it and no `package:` URI reaches it.
-    srcs = sorted([f.short_path for f in analyzable.srcs.to_list()])
+    srcs = sorted([f.short_path for f in analyzable.entry_srcs.to_list()])
     asserts.true(
         env,
         [p for p in srcs if p.endswith(_ENTRYPOINT)] != [],
-        "the entrypoint is missing from DartAnalyzableInfo.srcs: %s" % srcs,
+        "the entrypoint is missing from DartAnalyzableInfo.entry_srcs: %s" % srcs,
     )
 
     # And the closure around it, which one is: staging the entrypoint alone

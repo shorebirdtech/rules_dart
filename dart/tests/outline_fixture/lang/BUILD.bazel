@@ -1,0 +1,22 @@
+load("//dart:defs.bzl", "dart_library", "dart_package_metadata")
+load("//dart/tests:outline_guard.bzl", "variant_source")
+
+variant_source(
+    name = "src",
+    out = "lib/lang.dart",
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "outline_lang",
+)
+
+dart_library(
+    name = "lang",
+    srcs = [
+        "lib/legacy.dart",
+        ":src",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//dart/tests/outline_fixture:__subpackages__"],
+)

@@ -1,9 +1,25 @@
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+load("//dart/pub/private:pub_runner.bzl", "pub_runner")
+load("//tool:starlark_docs.bzl", "starlark_docs_test")
+
+# Runs pub from the pinned Dart SDK, at the root of the workspace it is run in:
+#   bazel run @rules_dart//dart/pub -- get
+#   bazel run @rules_dart//dart/pub -- upgrade --directory=app path
+# Built with no Dart tool of rules_dart's own, so it runs while the `pub`
+# extension refuses a lock: the state in which its errors say to run it.
+pub_runner(
+    name = "pub",
+    srcs = ["//dart/runfiles:lib/runfiles.dart"],
+    main = "//dart/pub/private:pub_runner.dart",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
 
 bzl_library(
-    name = "yaml_parser",
-    srcs = ["yaml_parser.bzl"],
+    name = "pubspec",
+    srcs = ["pubspec.bzl"],
     visibility = ["//visibility:public"],
+    deps = ["//dart/pub/private/pubspec_reader:reader"],
 )
 
 bzl_library(
@@ -11,15 +27,28 @@ bzl_library(
     srcs = ["pub_lock_package.bzl"],
     visibility = ["//visibility:public"],
     deps = [
-        ":yaml_parser",
+        ":pub_graph",
+        ":pubspec",
         "//dart/pub/private:build_content",
+        "//dart/pub/private:pub_archive",
+        "//dart/pub/private:pub_git",
+        "//dart/pub/private:pub_path",
     ],
 )
 
 bzl_library(
-    name = "pub_lock_hub",
-    srcs = ["pub_lock_hub.bzl"],
+    name = "pub_library",
+    srcs = ["pub_library.bzl"],
     visibility = ["//visibility:public"],
+    deps = [
+        "//dart:providers",
+        "//dart/private:dart_package_cycle",
+        "//dart/private:dart_summary",
+        "//dart/private:dart_test_runner",
+        "//dart/private:exec_groups",
+        "//dart/private:runtime",
+        "//dart/private:source_set",
+    ],
 )
 
 bzl_library(
@@ -27,10 +56,16 @@ bzl_library(
     srcs = ["extensions.bzl"],
     visibility = ["//visibility:public"],
     deps = [
-        ":pub_lock_hub",
+        ":pub_graph",
         ":pub_lock_package",
+        ":pub_versions",
         ":yaml_parser",
-        "//dart/pub/private:pub_repository",
+        "//dart/ext:registry",
+        "//dart/pub/private:pub_archive",
+        "//dart/pub/private:pub_lock_checks",
+        "//dart/pub/private:pub_lock_hub",
+        "//dart/pub/private:pub_lock_library",
+        "//dart/pub/private:pub_settings",
         "//dart/pub/private:version",
     ],
 )
@@ -38,5 +73,32 @@ bzl_library(
 bzl_library(
     name = "defs",
     srcs = ["defs.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart/pub/private:version"],
+)
+
+bzl_library(
+    name = "yaml_parser",
+    srcs = ["yaml_parser.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dart/pub/private:version",
+        "@yaml.bzl//:yaml",
+    ],
+)
+
+bzl_library(
+    name = "pub_versions",
+    srcs = ["pub_versions.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart/pub/private:version"],
+)
+
+# Every public symbol of this package's .bzl files is documented.
+starlark_docs_test(name = "docs_test")
+
+bzl_library(
+    name = "pub_graph",
+    srcs = ["pub_graph.bzl"],
     visibility = ["//visibility:public"],
 )

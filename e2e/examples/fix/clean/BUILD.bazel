@@ -1,0 +1,73 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_dart//dart:defs.bzl", "dart_codegen", "dart_library", "dart_package_metadata")
+load("//fix/tools:changes.bzl", "dart_changes")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "fix_clean",
+)
+
+# The green end of the red/green pair. //fix/dirty holds the same library with two
+# violations in it; this one is what `bazel run @rules_dart//dart/fix --
+# //fix/dirty:lib` must produce, and
+# `:lib` passing the `dart_analyze` aspect under `bazel test` is the proof that
+# what it produces passes the analyzer.
+exports_files(["lib/model.dart"])
+
+dart_codegen(
+    name = "model_g",
+    src = "lib/model.dart",
+    generator = "//fix/tools:part_gen",
+    output_suffixes = [".g.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_codegen(
+    name = "model_freezed",
+    src = "lib/model.dart",
+    generator = "//fix/tools:part_gen",
+    output_suffixes = [".freezed.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "lib",
+    srcs = [
+        "lib/model.dart",
+        ":model_freezed",
+        ":model_g",
+    ],
+    package = ":pubspec-metadata",
+)
+
+dart_changes(
+    name = "fixes",
+    output_group = "dart_fix_changes",
+    target = ":lib",
+)
+
+# Nothing left to fix, which is the other half of "red before, green after":
+# the sources that analyze clean are exactly the sources `dart fix` leaves
+# alone. Nothing dropped says the generated parts were never proposed either:
+# the aspect's exclusions kept `dart fix` off them rather than the
+# eligibility check discarding fixes after the fact. The `--content` list is
+# exhaustive, and here it is empty.
+run_binary(
+    name = "no_fixes",
+    srcs = [":fixes"],
+    outs = ["no_fixes.stamp"],
+    args = [
+        "--changes",
+        "$(execpath :fixes)",
+        "--out",
+        "$(execpath no_fixes.stamp)",
+    ],
+    tool = "//fix/tools:check_changes",
+)
+
+build_test(
+    name = "no_fixes_test",
+    size = "small",
+    targets = [":no_fixes"],
+)

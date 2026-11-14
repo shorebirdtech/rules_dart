@@ -1,0 +1,44 @@
+load("@rules_dart//dart:defs.bzl", "dart_analysis_options", "dart_binary")
+load("//:checks.bzl", "pub_graph_check")
+
+exports_files([
+    "lock_a.lock",
+    "lock_b.lock",
+    "lock_newer.lock",
+])
+
+# Both hubs build, each over packages the other's lock also lists.
+dart_binary(
+    name = "app",
+    main = "main.dart",
+    deps = [
+        "@deps_a//:path",
+        "@deps_b//:collection",
+    ],
+)
+
+# lock_b has `equatable` 2.0.7 and lock_a 2.0.8, and nothing else in the build
+# asks for `equatable`: lock against lock, the higher is built for both hubs.
+pub_graph_check(
+    name = "lower_lock_gets_the_higher_version",
+    target = "@deps_b//:equatable",
+    versions = {"equatable": "2.0.8"},
+)
+
+# lock_newer has get_it 9.3.0, newer than rules_dart's own tool lock, so this
+# builds only if rules_dart's lock yields to the root module's.
+dart_binary(
+    name = "newer_than_rules_dart",
+    main = "newer_than_rules_dart.dart",
+    deps = ["@deps_newer//:get_it"],
+)
+
+# The ruleset is a dep of the options file, not of `app`: a lint ruleset is not
+# a dependency of the code it lints, and listing it in `app`'s deps would carry
+# it into the `DartInfo` of everything downstream.
+dart_analysis_options(
+    name = "options",
+    src = "analysis_options.yaml",
+    visibility = ["//:__pkg__"],
+    deps = ["@very_good_analysis"],
+)

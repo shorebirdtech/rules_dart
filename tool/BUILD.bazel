@@ -1,0 +1,44 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("//dart:defs.bzl", "dart_binary", "dart_test")
+
+# Read by every `starlark_docs_test`.
+exports_files(
+    [
+        "starlark_docs.dart",
+        "starlark_docs_check.dart",
+    ],
+    visibility = ["//dart:__subpackages__"],
+)
+
+# Checks (or with `-- --refresh`, rewrites) the pubspec.lock files outside
+# e2e/. MODULE.bazel.lock files are `bazel run @overhead//locks:check`'s.
+dart_binary(
+    name = "pub_locks",
+    main = "pub_locks.dart",
+)
+
+# Prints the Dart SDK archive hashes a toolchain pin needs (see the file).
+dart_binary(
+    name = "fetch_sdk_hashes",
+    main = "fetch_sdk_hashes.dart",
+)
+
+dart_test(
+    name = "starlark_docs_test",
+    size = "small",
+    srcs = ["starlark_docs.dart"],
+    data = ["//tool/testdata:undocumented.binaryproto"],
+    main = "starlark_docs_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:protobuf",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+bzl_library(
+    name = "starlark_docs",
+    srcs = ["starlark_docs.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart:defs"],
+)

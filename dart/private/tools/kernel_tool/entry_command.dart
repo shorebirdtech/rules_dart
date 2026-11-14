@@ -24,7 +24,8 @@ Future<int> runEntry(Args args) async {
     File(configPath).readAsStringSync(),
     configRelative,
   );
-  final index = ModuleIndex(args.depManifests());
+  final manifests = args.depManifests();
+  final index = ModuleIndex(manifests);
 
   final main = args.one('main');
   final mainUri = config.uriFor(rootRelative(main, roots));
@@ -81,6 +82,7 @@ Future<int> runEntry(Args args) async {
       '--target',
       args.optional('target') ?? 'vm',
       for (final d in args.all('define')) '-D$d',
+      if (args.flag('track-creation-locations')) '--track-creation-locations',
       '--filesystem-scheme',
       rootScheme,
       for (final root in roots) ...['--filesystem-root', root],
@@ -110,6 +112,9 @@ Future<int> runEntry(Args args) async {
     return 1;
   }
 
+  File(args.one('unused-inputs-output')).writeAsStringSync(
+    [for (final dir in unusedModuleDirs(manifests, reach)) '$dir\n'].join(),
+  );
   File(args.one('selection-output')).writeAsStringSync(
     const JsonEncoder.withIndent('  ').convert({
       'modules': [
@@ -119,6 +124,17 @@ Future<int> runEntry(Args args) async {
     }),
   );
   return 0;
+}
+
+/// The module directories of [manifests] that [reach] has nothing in: Bazel
+/// does not rerun the compile when only these change. A directory is one
+/// input to Bazel, so one whose modules are reached in part stays an input.
+List<String> unusedModuleDirs(List<Manifest> manifests, ModuleReach reach) {
+  final reached = {for (final m in reach.order) m.manifest};
+  return [
+    for (final manifest in manifests)
+      if (!reached.contains(manifest)) manifest.dir,
+  ];
 }
 
 /// The message for a program that reaches a module that is unsupported or

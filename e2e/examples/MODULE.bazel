@@ -1,0 +1,432 @@
+# One working example per rules_dart feature (README.md lists them), and the
+# fixtures under fixtures/ that test their edge cases. The common setup comes
+# first; each section after it sets up what one directory needs.
+module(name = "examples")
+
+bazel_dep(name = "rules_dart", version = "0.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+local_path_override(
+    module_name = "rules_dart",
+    path = "../..",
+)
+
+dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
+dart.toolchain(dart_version = "3.13.7")
+use_repo(dart, "dart_toolchains")
+
+register_toolchains("@dart_toolchains//:all")
+
+pub = use_extension("@rules_dart//dart/pub:extensions.bzl", "pub")
+
+# The lint ruleset the analysis options include. Lint-only: reached through
+# options files, never through a lock, so it does not become a dependency of
+# anything that compiles.
+pub.package(
+    name = "very_good_analysis",
+    sha256 = "0bd5eb8d6be76aa0d71e70cbdae6cac8f784f761170568e3c2214a6948c7f6d3",
+    version = "11.0.0",
+)
+use_repo(pub, "very_good_analysis")
+
+# web/app: its pub dependencies, from the lock `dart pub get` writes beside its
+# pubspec; its path package is the workspace's own target.
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//web/app:pubspec.lock",
+    resolve = {"greet": "//web/app/greet"},
+)
+use_repo(pub, "pub_deps")
+
+# shared_lint_rules: a module sharing a lint ruleset, which its options file
+# includes by `package:` URI.
+bazel_dep(name = "lint_rules", version = "0.0.0")
+local_path_override(
+    module_name = "lint_rules",
+    path = "fixtures/modules/lint_rules",
+)
+
+# builders, native_assets: SQLite, built from its C amalgamation (the BCR
+# sqlite3 module) and wrapped in a cc_shared_library, for the drift exemplar's
+# database test and native_assets/sqlite3_binary: the Bazel sandbox has no
+# system libsqlite3 on Linux or Windows. rules_cc is needed for the
+# cc_shared_library load.
+bazel_dep(name = "sqlite3", version = "3.53.4")
+bazel_dep(name = "rules_cc", version = "0.2.28")
+
+# On macOS, rules_cc leaves C++ to apple_support's toolchain. 2.9.0 builds that
+# toolchain's helper tools for macOS 11, the oldest Xcode 27's libc++ accepts
+# without a warning.
+bazel_dep(name = "apple_support", version = "2.10.1")
+
+# builders: the exemplars' pub dependencies, and the external-builder
+# fixture's own resolution of build, source_gen and analyzer, apart from
+# `pub_deps`, as a builder from another rule set has.
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//builders:pubspec.lock",
+)
+pub.from_lock(
+    name = "builder_pub_deps",
+    lock = "//builders/external_builder/builder:pubspec.lock",
+)
+use_repo(pub, "builder_pub_deps")
+
+# native_assets/webcrypto: `webcrypto`, declared on its own at the version
+# rules_dart curates a code asset for, and the packages its pubspec names that
+# no lock here lists.
+pub.package(
+    name = "webcrypto",
+    sha256 = "bdfa2b11696f2bac02834649d9e07d24a5154e527feec21ed1bdf81b31f982df",
+    version = "0.6.2",
+)
+pub.package(
+    name = "native_toolchain_cmake",
+    sha256 = "8ba223410102665483e873b83d2156720233a6a0181c07f9dc41cb2e961336b0",
+    version = "0.3.2",
+)
+pub.package(
+    name = "change_case",
+    sha256 = "e41ef3df58521194ef8d7649928954805aeb08061917cf658322305e61568003",
+    version = "2.2.0",
+)
+use_repo(pub, "webcrypto")
+
+# A C++ toolchain for Linux arm64 execution platforms, so a C++ library built
+# for the host that runs a test (or for a code generator) compiles on a Linux
+# arm64 worker. hermetic-llvm's toolchain is one static binary with its own C
+# library, so the worker needs no headers or shared libraries. Only the
+# Linux-exec, Linux-target toolchain is registered: Mac builds keep the host's.
+bazel_dep(name = "llvm", version = "0.8.26", dev_dependency = True)
+
+llvm_tc = use_extension("@llvm//extensions:toolchain.bzl", "toolchain", dev_dependency = True)
+llvm_tc.exec(
+    arch = "aarch64",
+    os = "linux",
+)
+llvm_tc.target(
+    arch = "aarch64",
+    os = "linux",
+)
+use_repo(llvm_tc, "llvm_toolchains")
+
+register_toolchains(
+    "@llvm_toolchains//:all",
+    dev_dependency = True,
+)
+
+# native_hooks: its packages' pub dependencies, and a package with a link hook
+# that comes from another module, as a pub package's does. Its code assets are
+# built by the C toolchain the builders section sets up.
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//native_hooks:pubspec.lock",
+)
+
+bazel_dep(name = "ext_hook", version = "0.0.0")
+local_path_override(
+    module_name = "ext_hook",
+    path = "fixtures/modules/ext_hook",
+)
+
+# gazelle: Gazelle with the rules_dart plugin, which writes the BUILD files
+# under gazelle/, and the runtime packages of gazelle/codegen. Building the Go
+# binaries goes through the C++ toolchain, apple_support's on macOS (the
+# builders section).
+bazel_dep(name = "gazelle", version = "0.54.0")
+bazel_dep(name = "rules_dart_gazelle_plugin", version = "0.0.0")
+local_path_override(
+    module_name = "rules_dart_gazelle_plugin",
+    path = "../../gazelle",
+)
+
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//gazelle/codegen:pubspec.lock",
+)
+
+# pub/package: one pub.dev package, declared on its own with its version and
+# archive digest.
+pub.package(
+    name = "path",
+    sha256 = "75cca69d1490965be98c73ceaea117e8a04dd21217b37b292c9ddbec0d955bc5",
+    version = "1.9.1",
+)
+use_repo(pub, "path")
+
+# pub/lock: the packages of a pubspec.lock, through a dev-only use of the pub
+# extension, as a module whose dependents need none of them would declare
+# them; and the package metadata every fetched package carries.
+bazel_dep(name = "package_metadata", version = "0.0.15")
+
+pub_dev = use_extension("@rules_dart//dart/pub:extensions.bzl", "pub", dev_dependency = True)
+pub_dev.from_lock(
+    name = "lock_deps",
+    lock = "//pub/lock:pubspec.lock",
+)
+use_repo(pub_dev, "lock_deps")
+
+# pub/resolve: the lock lists `shared_models` as a `path` package, which must
+# be mapped, and `petitparser` as a hosted one, mapped here to a fork that
+# `xml` must then get. A mapping replaces the package for every module,
+# rules_dart's own tools included, so no other lock here may list either.
+pub.from_lock(
+    name = "resolve_deps",
+    lock = "//pub/resolve:pubspec.lock",
+    resolve = {
+        "petitparser": "//pub/resolve/third_party/petitparser",
+        "shared_models": "//pub/resolve/shared_models",
+    },
+)
+use_repo(pub, "resolve_deps")
+
+# pub/path: the lock lists three `path` packages, as `dart pub get` writes
+# them. No Bazel target builds `local_greeting`, so it is built from its
+# directory as a hosted package is from its archive, `meta` from the lock among
+# its deps. `editor_only` is for the editor alone: its hub label exists, and
+# depending on it fails analysis with the reason
+# (`//pub/path:ignored_package_refused`).
+pub.from_lock(
+    name = "path_deps",
+    build_from_pubspec = ["local_greeting"],
+    ignored = {"editor_only": "only the editor reads it"},
+    lock = "//pub/path:pubspec.lock",
+)
+
+# `has_build` has a BUILD file of its own, so building it from its pubspec is
+# refused when its repository is fetched; CI builds `@refused//:has_build` and
+# expects the error.
+pub.from_lock(
+    name = "refused",
+    build_from_pubspec = ["has_build"],
+    lock = "//pub/path/refused:pubspec.lock",
+)
+use_repo(pub, "path_deps", "refused")
+
+# pub/git: git repositories made on the spot, beside the lock `dart pub get`
+# writes for them: no network, and every commit id is the same on every
+# machine. `git_cyc_a` and `git_cyc_b` depend on each other. dep_mod is a
+# dependency module whose own lock lists `git_root` from pub.dev and `git_sub`
+# at another commit.
+git_fixture = use_repo_rule("//pub/git:git_fixture.bzl", "git_fixture")
+
+git_fixture(name = "git_fixture")
+
+pub.from_lock(
+    name = "deps",
+    lock = "@git_fixture//:pubspec.lock",
+)
+pub.cycle(packages = [
+    "git_cyc_a",
+    "git_cyc_b",
+])
+use_repo(pub, "deps")
+
+bazel_dep(name = "dep_mod", version = "0.0.0")
+local_path_override(
+    module_name = "dep_mod",
+    path = "pub/git/dep_mod",
+)
+
+# pub/cycle: `dio` and `dio_web_adapter` depend on each other; rules_dart's
+# curated cycles declare that one, so nothing here does. `ping` and `pong`,
+# packages of this workspace, depend on each other too, which the root
+# declares.
+pub.from_lock(
+    name = "cyc",
+    build_from_pubspec = [
+        "ping",
+        "pong",
+    ],
+    lock = "//pub/cycle:pubspec.lock",
+)
+pub.cycle(packages = [
+    "ping",
+    "pong",
+])
+use_repo(pub, "cyc")
+
+# codegen: copy_to_directory for a package assembled by hand
+# (codegen/source_set_pkg), and the fixture packages' pub dependencies.
+bazel_dep(name = "bazel_lib", version = "3.7.2")
+
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//codegen:pubspec.lock",
+)
+
+# fix: the fixture generator's own pub resolution (fix/tools), and
+# fix/unused's conformance test's, `package:test` among them.
+pub.from_lock(
+    name = "generator_pub_deps",
+    lock = "//fix/tools:pubspec.lock",
+)
+pub.from_lock(
+    name = "test_pub_deps",
+    lock = "//fix/unused:pubspec.lock",
+)
+use_repo(pub, "generator_pub_deps", "test_pub_deps")
+
+# tests/package_test: tests under `package:test`, with pub dependencies from
+# the lock beside its pubspec. Each lock that names the hub `pub_deps` adds
+# its packages to it.
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//tests/package_test:pubspec.lock",
+)
+
+# web/per_compiler: its fixtures' pub dependencies, and the fixture generator's
+# own pub resolution, apart from the fixtures' code.
+pub.from_lock(
+    name = "pub_deps",
+    lock = "//web/per_compiler:pubspec.lock",
+)
+pub.from_lock(
+    name = "generator_pub_deps",
+    lock = "//web/per_compiler/tools:pubspec.lock",
+)
+
+# cross_compile: the platforms it builds for.
+bazel_dep(name = "rules_platform", version = "0.1.0")
+
+# fixtures/no_pubspec: pub packages without a pubspec, each pinned here, where
+# Bazel pins any other archive, rather than resolved from a pubspec into a
+# lock. Each is built with the dependencies its archive's pubspec states, so
+# `json_annotation` needs no word about `meta` beyond the pin that supplies it.
+pub.package(
+    name = "json_annotation",
+    sha256 = "2a743920d81b7910627f68ee2c9ac1fc0bfee32b9fc3403587d7c6791ca12f80",
+    version = "4.12.0",
+)
+pub.package(
+    name = "meta",
+    sha256 = "307249ce4ff29d58a18e97f6345f539382eb9c9c29ecda628900f31de0443dd9",
+    version = "1.19.0",
+)
+use_repo(pub, "change_case", "json_annotation", "meta", "native_toolchain_cmake")
+
+# fixtures/pub_cycle_refused: packages that depend on each other build as one
+# library only where the root declares the cycle, exactly. Each case fails
+# when its library repository is fetched, and nothing else here depends on
+# them.
+pub.from_lock(
+    name = "refused_cycles",
+    build_from_pubspec = [
+        "left",
+        "old_a",
+        "old_b",
+        "right",
+        "theirs",
+        "tri_a",
+        "tri_b",
+        "tri_c",
+    ],
+    lock = "//fixtures/pub_cycle_refused:pubspec.lock",
+    resolve = {"mine": "//fixtures/pub_cycle_refused/mine"},
+)
+
+# `left` and `right` depend on each other, and nothing declares it.
+
+# `mine`, which a target of this workspace builds, and `theirs`, built from
+# its pubspec, depend on each other: no declaration can build that.
+
+# `old_a` depends on `old_b`, but not the other way round: a stale declaration.
+pub.cycle(packages = [
+    "old_a",
+    "old_b",
+])
+
+# `tri_a`, `tri_b` and `tri_c` are one cycle, of which this declares only part.
+pub.cycle(packages = [
+    "tri_a",
+    "tri_b",
+])
+use_repo(pub, "refused_cycles")
+
+# fixtures/pub_missing_dep: `provider`'s pubspec depends on `flutter`, which
+# nothing here supplies: no `pub.package()` and no lock. The fetch must name
+# both, not leave the compile to find `package:flutter` missing.
+pub.package(
+    name = "provider",
+    sha256 = "4abbd070a04e9ddc287673bf5a030c7ca8b685ff70218720abab8b092f53dd84",
+    version = "6.1.5",
+)
+use_repo(pub, "provider")
+
+# fixtures/pub_member_kind: a rule set of its own building pub packages the
+# way `pub.from_lock()` does, over rules_dart's public pub surface only: its
+# own member kind, carrying data rules_dart knows nothing about, its own
+# library rule and repositories, and a dependency cycle (alpha <-> beta)
+# mixing its members with rules_dart's.
+fancy = use_extension("//fixtures/pub_member_kind/ext:extension.bzl", "fancy")
+fancy.package(
+    name = "alpha",
+    greeting = "hello from alpha",
+    pubspec = "//fixtures/pub_member_kind/pkgs/alpha:pubspec.yaml",
+)
+
+# rules_dart's own member kind, in the same cycle as alpha.
+fancy.package(
+    name = "beta",
+    pubspec = "//fixtures/pub_member_kind/pkgs/beta:pubspec.yaml",
+)
+fancy.package(
+    name = "gamma",
+    greeting = "hello from gamma",
+    pubspec = "//fixtures/pub_member_kind/pkgs/gamma:pubspec.yaml",
+)
+fancy.cycle(packages = [
+    "alpha",
+    "beta",
+])
+use_repo(fancy, "fancy__alpha", "fancy__beta", "fancy__gamma")
+
+# fixtures/pub_dedup: packages that several locks list are built once, from
+# two locks of this module and from the locks of two dependency modules, one
+# with a hub named as one of this module's.
+pub.from_lock(
+    name = "two_hubs_a",
+    lock = "//fixtures/pub_dedup/two_hubs:lock_a.lock",
+)
+pub.from_lock(
+    name = "two_hubs_b",
+    lock = "//fixtures/pub_dedup/two_hubs:lock_b.lock",
+)
+pub.from_lock(
+    name = "deps_a",
+    lock = "//fixtures/pub_dedup/cross_module:lock_a.lock",
+)
+use_repo(pub, "deps_a", "two_hubs_a", "two_hubs_b")
+
+bazel_dep(name = "module_b", version = "0.0.0")
+local_path_override(
+    module_name = "module_b",
+    path = "fixtures/pub_dedup/cross_module/module_b",
+)
+
+bazel_dep(name = "module_c", version = "0.0.0")
+local_path_override(
+    module_name = "module_c",
+    path = "fixtures/pub_dedup/cross_module/module_c",
+)
+
+# fixtures/kernel_source_refused: each repository is declared wrongly in its
+# own way, and fails only when it is fetched. `/usr` is a directory that is
+# not a Dart SDK checkout.
+dart_kernel_source = use_repo_rule("@rules_dart//dart:repositories.bzl", "dart_kernel_source")
+
+dart_kernel_source(
+    name = "both",
+    dart_version = "3.13.7",
+    path = "/usr",
+)
+
+dart_kernel_source(
+    name = "neither",
+)
+
+dart_kernel_source(
+    name = "not_a_checkout",
+    path = "/usr",
+)

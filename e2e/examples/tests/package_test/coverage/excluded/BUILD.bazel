@@ -1,0 +1,18 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "excluded",
+)
+
+dart_library(
+    name = "excluded",
+    srcs = ["lib/excluded.dart"],
+    package = ":pubspec-metadata",
+    visibility = ["//tests/package_test/coverage:__subpackages__"],
+)
+
+exports_files(
+    ["lib/excluded.dart"],
+    visibility = ["//tests/package_test/coverage:__subpackages__"],
+)

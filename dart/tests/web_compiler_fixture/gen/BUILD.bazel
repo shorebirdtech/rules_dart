@@ -1,0 +1,23 @@
+load("//dart:defs.bzl", "dart_codegen", "dart_library")
+
+# Codegen resets the web compiler: its outputs are the same whichever binary
+# reaches it, so it runs once.
+dart_codegen(
+    name = "model_g",
+    src = "lib/model.dart",
+    config = json.encode({"content": "part of 'model.dart';\n"}),
+    generator = "//dart/tests/fixture_generator:generator",
+    output_suffixes = [".g.dart"],
+    # The stand-in generator writes an empty part: analysis only.
+    tags = ["manual"],
+)
+
+dart_library(
+    name = "gen",
+    srcs = [
+        "lib/model.dart",
+        ":model_g",
+    ],
+    tags = ["manual"],
+    visibility = ["//dart/tests/web_compiler_fixture:__subpackages__"],
+)

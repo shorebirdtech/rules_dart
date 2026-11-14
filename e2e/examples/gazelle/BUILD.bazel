@@ -1,0 +1,54 @@
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+load("@rules_dart//dart:defs.bzl", "dart_analysis_options", "dart_test")
+
+# Gazelle writes the BUILD files of `codegen/`, `split/`, `cycle/` (bar
+# `cycle/BUILD.bazel`'s `dart_code_asset` and the `code_assets` naming it) and
+# `rally/` (bar the `dart_cycle` directive declaring its packages a cycle),
+# which this workspace builds and tests; CI fails when `bazel run
+# //gazelle:gazelle -- -mode=diff gazelle` would change one. Run from the
+# workspace root, Gazelle visits only this directory: its directives here
+# govern it. `gazelle_test` runs it over copies of the
+# samples below, which are its inputs and have no BUILD files of their own.
+# gazelle:exclude bin
+# gazelle:exclude lib
+# gazelle:exclude test
+# gazelle:exclude gazelle_test.dart
+gazelle_binary(
+    name = "gazelle_bin",
+    languages = [
+        "@rules_dart_gazelle_plugin//dart",
+    ],
+)
+
+gazelle(
+    name = "gazelle",
+    gazelle = ":gazelle_bin",
+)
+
+_SAMPLES = [
+    "bin/deferred_import.dart",
+    "bin/hello.dart",
+    "bin/show_import.dart",
+    "lib/greeter.dart",
+    "lib/io_impl.dart",
+    "lib/platform_client.dart",
+    "lib/stub.dart",
+    "lib/web_impl.dart",
+    "test/greeter_test.dart",
+]
+
+dart_test(
+    name = "gazelle_test",
+    size = "small",
+    args = ["$(rlocationpath :gazelle_bin)"] +
+           ["$(rlocationpath %s)" % f for f in _SAMPLES],
+    data = _SAMPLES + [":gazelle_bin"],
+    main = "gazelle_test.dart",
+    deps = ["@rules_dart//dart/runfiles"],
+)
+
+dart_analysis_options(
+    name = "analysis_options",
+    src = "analysis_options.yaml",
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,8 @@
+# Only for overhead's own tests. The tools' one pub dependency, package:yaml
+# for //ci, is ci/pubspec.yaml's.
+name: overhead
+publish_to: none
+environment:
+  sdk: ^3.11.0
+dev_dependencies:
+  test: ^1.26.0

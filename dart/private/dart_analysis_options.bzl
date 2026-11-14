@@ -28,6 +28,8 @@ analyzed target's own provider.
 load("//dart:providers.bzl", "DartAnalysisOptionsInfo", "DartInfo")
 load("//dart/private:common.bzl", "collect_packages", "collect_transitive_resources", "collect_transitive_srcs")
 
+visibility("//dart/...")
+
 def _dart_analysis_options_impl(ctx):
     return [
         # A single file, so this target is still usable anywhere a plain
@@ -62,6 +64,6 @@ dart_analysis_options = rule(
     doc = (
         "An `analysis_options.yaml` bundled with the packages its `include:` " +
         "directives resolve against. List it in a `dart_analysis_config` " +
-        "for the `dart_analyze` aspect and `dart_format`."
+        "for the `dart_analyze` aspect."
     ),
 )

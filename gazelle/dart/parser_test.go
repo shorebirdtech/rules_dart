@@ -30,6 +30,15 @@ func TestParseDartFile(t *testing.T) {
 			},
 		},
 		{
+			name: "DirectivesInStringsAndCommentsAreNotImports",
+			input: "import 'a.dart';\n/*\nimport 'b.dart';\n*/\n// import 'c.dart';\n" +
+				"void main() {\n  final s = r'''\nimport 'package:bar/bar.dart';\n''';\n" +
+				"  final t = \"\"\"\n        import 'package:';\n\"\"\";\n}\n",
+			want: []DartImport{
+				{URI: "a.dart", IsRelative: true, Path: "a.dart"},
+			},
+		},
+		{
 			name:  "RelativeImport",
 			input: `import 'helper.dart';`,
 			want: []DartImport{
@@ -295,7 +304,7 @@ func TestParseDartCodegenTriggers(t *testing.T) {
 		want  []string
 	}{
 		{
-			// Mirrors e2e/ext_exemplar/built_value/lib/user.dart: idiomatic
+			// Mirrors e2e/examples/builders/built_value/lib/user.dart: idiomatic
 			// built_value carries NO annotation — the trigger is the
 			// `implements Built<T, TBuilder>` clause.
 			name: "BuiltInterfaceImplements",
@@ -378,6 +387,51 @@ abstract class User implements Built<User, UserBuilder> {}`,
 			input: `@BuiltValue(instantiable: false)
 abstract class User implements Built<User, UserBuilder> {}`,
 			want: []string{"BuiltValue"},
+		},
+		{
+			// freezed writes a @JsonSerializable class into its output for
+			// a class with a fromJson factory, so the source needs
+			// json_serializable though it names no annotation of its own.
+			name: "FreezedFromJsonFactoryNeedsJsonSerializable",
+			input: `@freezed
+abstract class Event with _$Event {
+  const factory Event({required String id}) = _Event;
+  factory Event.fromJson(Map<String, Object?> json) => _$EventFromJson(json);
+}`,
+			want: []string{"freezed", "JsonSerializable"},
+		},
+		{
+			name: "FreezedJsonFlagNeedsJsonSerializable",
+			input: `@Freezed(fromJson: true, toJson: true)
+abstract class Event with _$Event {
+  const factory Event({required String id}) = _Event;
+}`,
+			want: []string{"Freezed", "JsonSerializable"},
+		},
+		{
+			name: "FreezedWithoutJson",
+			input: `@freezed
+abstract class Point with _$Point {
+  const factory Point({required int x}) = _Point;
+}`,
+			want: []string{"freezed"},
+		},
+		{
+			name: "FreezedExplicitJsonSerializableNotDuplicated",
+			input: `@freezed
+@JsonSerializable()
+abstract class Event with _$Event {
+  factory Event.fromJson(Map<String, Object?> json) => _$EventFromJson(json);
+}`,
+			want: []string{"freezed", "JsonSerializable"},
+		},
+		{
+			// Without freezed, a fromJson factory is the user's own.
+			name: "FromJsonWithoutFreezed",
+			input: `class Plain {
+  factory Plain.fromJson(Map<String, Object?> json) => Plain();
+}`,
+			want: nil,
 		},
 		{
 			// @SerializersFor is annotation-driven (no Built<> clause);
@@ -513,5 +567,26 @@ part 'real.g.dart';`,
 				}
 			}
 		})
+	}
+}
+
+func TestHasTopLevelMain(t *testing.T) {
+	dir := t.TempDir()
+	for src, want := range map[string]bool{
+		"void main() {}\n": true,
+		"Future<void> main(List<String> args) async {}\n":    true,
+		"main() => print(1);\n":                              true,
+		"import 'x.dart';\n\nvoid main(List<String> a) {}\n": true,
+		"class A {\n  void main() {}\n}\n":                   false,
+		"// void main() {}\nString x() => 'main()';\n":       false,
+		"void mainly() {}\n":                                 false,
+	} {
+		p := filepath.Join(dir, "f.dart")
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := HasTopLevelMain(p); got != want {
+			t.Errorf("%q: %v, want %v", src, got, want)
+		}
 	}
 }

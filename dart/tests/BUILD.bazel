@@ -1,27 +1,74 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load(":build_hook_test.bzl", "build_hook_test_suite")
 load(":code_asset_test.bzl", "code_asset_test_suite")
 load(":codegen_test.bzl", "codegen_test_suite")
 load(":common_test.bzl", "common_test_suite")
 load(":dart_binary_test.bzl", "dart_binary_test_suite")
+load(":data_asset_test.bzl", "data_asset_test_suite")
 load(":defines_test.bzl", "defines_test_suite")
-load(":language_version_test.bzl", "language_version_test_suite")
+load(":import_check_test.bzl", "import_check_test_suite")
 load(":library_test.bzl", "library_test_suite")
+load(":license_file_test.bzl", "license_file_test_suite")
 load(":link_hook_test.bzl", "link_hook_test_suite")
 load(":native_assets_test.bzl", "native_assets_test_suite")
+load(":package_record_test.bzl", "package_record_test_suite")
 load(":project_staging_test.bzl", "project_staging_test_suite")
 load(":propagation_test.bzl", "propagation_test_suite")
 load(":provider_shape_test.bzl", "provider_shape_probe")
+load(":pub_archive_test.bzl", "pub_archive_test_suite")
+load(":pub_git_test.bzl", "pub_git_test_suite")
+load(":pub_graph_test.bzl", "pub_graph_test_suite")
+load(":pub_lock_checks_test.bzl", "pub_lock_checks_test_suite")
+load(":pub_versions_test.bzl", "pub_versions_test_suite")
+load(":purl_test.bzl", "package_metadata_check", "purl_test_suite")
 load(":registry_test.bzl", "registry_test_suite")
+load(":repositories_reproducible_test.bzl", "repositories_reproducible_test_suite")
+load(":resources_test.bzl", "resources_test_suite")
 load(":semver_test.bzl", "semver_test_suite")
 load(":source_set_test.bzl", "source_set_test_suite")
 load(":toolchain_selection_test.bzl", "toolchain_selection_test_suite")
 load(":toolchains_test.bzl", "toolchains_test_suite")
 load(":versions_test.bzl", "versions_test_suite")
+load(":web_compiler_test.bzl", "web_compiler_test_suite")
 load(":yaml_parser_test.bzl", "yaml_parser_test_suite")
+
+# Test fixtures: no API docs.
+# gazelle:map_kind bzl_library bzl_library @bazel_skylib//:bzl_library.bzl
 
 versions_test_suite(name = "versions_test")
 
 toolchains_test_suite(name = "toolchains_test")
+
+repositories_reproducible_test_suite(name = "repositories_reproducible_test")
+
+purl_test_suite(name = "purl_test")
+
+# Native code built in place of a package's build hook is identified as what
+# it is built from, not as the Dart package: SQLite as the BCR module, the
+# BoringSSL webcrypto vendors as BoringSSL. webcrypto's own C glue is in its
+# pub archive, so is that package's.
+package_metadata_check(
+    name = "curated_package_metadata",
+    want = {
+        "//dart/ext/sqlite3:libsqlite3": "//dart/ext/sqlite3:sqlite3_package_metadata",
+        "//dart/ext/sqlite3:code_asset": "//:package_metadata",
+        "@webcrypto_pub_archive//:boringssl_crypto": "@webcrypto_pub_archive//:boringssl_package_metadata",
+        "@webcrypto_pub_archive//:webcrypto": "@webcrypto_pub_archive//:package_metadata",
+        "//dart/ext/webcrypto:libwebcrypto": "//:package_metadata",
+    },
+    deps = [
+        "//dart/ext/sqlite3:code_asset",
+        "//dart/ext/webcrypto:code_asset",
+    ],
+)
+
+build_test(
+    name = "curated_package_metadata_test",
+    targets = [":curated_package_metadata"],
+)
+
+resources_test_suite(name = "resources_test")
 
 toolchain_selection_test_suite(name = "toolchain_selection_test")
 
@@ -35,7 +82,11 @@ native_assets_test_suite(name = "native_assets_test")
 
 code_asset_test_suite(name = "code_asset_test")
 
+data_asset_test_suite(name = "data_asset_test")
+
 propagation_test_suite(name = "propagation_test")
+
+package_record_test_suite(name = "package_record_test")
 
 registry_test_suite(name = "registry_test")
 
@@ -47,13 +98,27 @@ codegen_test_suite(name = "codegen_test")
 
 source_set_test_suite(name = "source_set_test")
 
-language_version_test_suite(name = "language_version_test")
-
 library_test_suite(name = "library_test")
 
 link_hook_test_suite(name = "link_hook_test")
 
+build_hook_test_suite(name = "build_hook_test")
+
+license_file_test_suite(name = "license_file_test")
+
+pub_archive_test_suite(name = "pub_archive_test")
+
+pub_git_test_suite(name = "pub_git_test")
+
 semver_test_suite(name = "semver_test")
+
+pub_graph_test_suite(name = "pub_graph_test")
+
+pub_lock_checks_test_suite(name = "pub_lock_checks_test")
+
+pub_versions_test_suite(name = "pub_versions_test")
+
+web_compiler_test_suite(name = "web_compiler_test")
 
 provider_shape_probe(
     name = "provider_shape_probe_target",
@@ -63,4 +128,37 @@ provider_shape_probe(
 build_test(
     name = "provider_shape_test",
     targets = [":provider_shape_probe_target"],
+)
+
+import_check_test_suite(name = "import_check_test")
+
+bzl_library(
+    name = "outline_guard",
+    srcs = ["outline_guard.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dart:providers",
+        "//dart/private:dart_module",
+        "@bazel_skylib//rules:copy_file",
+    ],
+)
+
+bzl_library(
+    name = "small_suite",
+    srcs = ["small_suite.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@bazel_skylib//lib:partial",
+        "@bazel_skylib//lib:unittest",
+    ],
+)
+
+bzl_library(
+    name = "kernel_checkout",
+    srcs = ["kernel_checkout.bzl"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//dart:repositories",
+        "//dart/private:versions",
+    ],
 )

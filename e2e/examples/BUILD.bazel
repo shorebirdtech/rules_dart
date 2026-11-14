@@ -1,0 +1,61 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_analysis_config",
+    "dart_analysis_options",
+    "dart_library",
+    "dart_package_metadata",
+)
+
+# Each top-level directory is one example (README.md), and fixtures/ holds
+# their edge cases. Each file is analyzed under the nearest options file above
+# it that this config lists.
+dart_analysis_config(
+    name = "analysis_config",
+    options = [
+        ":options",
+        "//analysis/pkg_wide:options",
+        "//analysis/wide:options",
+        "//analysis:options",
+        "//builders:options",
+        "//codegen:options",
+        "//fix:options",
+        "//fixtures/analysis_failure/fmt_unresolved:options",
+        "//fixtures/analysis_failure/nested:loud_options",
+        "//fixtures/analysis_failure/nested:options",
+        "//fixtures/analysis_failure/undeclared_include:options",
+        "//fixtures/analysis_failure/unresolved_ruleset:options",
+        "//fixtures/analysis_failure/vga:options",
+        "//fixtures/analysis_failure:options",
+        "//fixtures/no_pubspec:options",
+        "//gazelle:analysis_options",
+        "//shared_lint_rules:options",
+        "//web/per_compiler:options",
+    ],
+)
+
+# The lint ruleset is a pub package the options file includes by `package:`
+# URI. It belongs here rather than in any library's `deps`: naming it there
+# would carry a lint-only package into the `DartInfo` of everything downstream.
+dart_analysis_options(
+    name = "options",
+    src = "analysis_options.yaml",
+    deps = ["@very_good_analysis"],
+)
+
+# The workspace's root package (empty package_root), which `//web/app`'s
+# binaries depend on: its lib/ sources must be staged for the web compile like
+# any other dep package. No pubspec states it, here or on any directory above
+# `//fixtures/no_pubspec`.
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "examples",
+)
+
+exports_files(["lib/root_greet.dart"])
+
+dart_library(
+    name = "rootlib",
+    srcs = ["lib/root_greet.dart"],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+)
