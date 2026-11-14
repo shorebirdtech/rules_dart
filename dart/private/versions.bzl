@@ -173,6 +173,7 @@ CROSS_TOOL_VERSIONS = {
 # from which `dart_kernel_source` builds the outline stripper on that SDK's own
 # `pkg/kernel`.
 SOURCE_VERSIONS = {
+    "3.14.0": "f9cdd43f4c05d7f8cbd1caea31e3505d1f81c489d008c063c7bc028364844f65",
     "3.13.7": "cd2a1450f33cfeb35f180d33b836ab92a663d1335ee7f953ae3ebcb20308c99d",
     "3.13.5": "2da077bf89f3a14ae5a741728549371d87013265df49b8cace6475bd9ffc59e3",
     "3.13.4": "8a6040a7998e157e4ff6ec29141a78478aac000b372a2b065a9c53ba40cf8fa9",
