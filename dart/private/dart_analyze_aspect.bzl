@@ -9,17 +9,20 @@ Applied from the command line, in `.bazelrc`:
 
 it checks each Dart target named on the command line (it does not propagate
 along `deps`), and only that target's *own* files: its `DefaultInfo` `.dart`
-files plus its `DartAnalyzableInfo.srcs`. Each check is its own output group
-and its own action — `dart_analyze` for the analyzer, `dart_format` for
-`dart format --set-exit-if-changed` — so a project runs whichever of the two
-its `--output_groups` names, and only that one. Its in-repository dependencies are
-staged so their imports resolve and excluded so they are not re-checked — each
-is checked when it is itself a target of the build. Targets in other
-repositories (pub packages, other Bazel modules) are never checked here: the
-module that owns them checks them under its own options. Generated files
+files plus its `DartAnalyzableInfo.entry_srcs`. Each check is its own output group
+and its own actions — `dart_analyze` for the analyzer, `dart_format` for the
+format check — so a project runs whichever of the two its `--output_groups`
+names, and only that one. Its in-repository dependencies are never re-checked
+here — each is checked when it is itself a target of the build: under
+`analysis_summaries` (the default) their imports resolve through the
+dependencies' analyzer summaries and only the target's own files are staged;
+with it off they are staged so their imports resolve, and excluded. Targets
+in other repositories (pub packages, other Bazel modules) are never checked
+here: the module that owns them checks them under its own options. Generated files
 (anything not `is_source`) are never checked. The `no-dart-analyze` tag opts a
-target out of analysis (its fixes stay available to `dart_fix`), and
-`no-dart-format` out of the format check; each leaves the other in place.
+target out of analysis (its fixes stay available to
+`@rules_dart//dart/fix`), and `no-dart-format` out of the format check and its
+rewrites; each leaves the other in place.
 
 Options come from the `dart_analysis_config` the `analysis_config` flag names.
 Every `analysis_options.yaml` it lists is staged at its real workspace path,
@@ -29,9 +32,7 @@ govern which file. A relative `include:` resolves against the staged copy, so
 it can only reach what is staged; the one way to share a yaml that governs no
 directory is a `package:` include of a package in the options target's `deps`.
 The formatter finds its `formatter:` section by the same walk, so both checks
-read one file's options from the same place, and
-`dart_format` stages the same files the same way (`stage_config_project`) for
-`bazel run`, so a run cannot format to settings the check does not apply.
+read one file's options from the same place.
 
 The format check names the target's own files individually and passes the
 language version of the target's own package on the command line. That version
@@ -42,22 +43,33 @@ package of its own takes the version of the in-repo package whose root contains
 its entrypoint, and one containing no such package is formatted at `latest`, as
 `dart format` would with nothing to go on.
 
-`dart_analysis_test` applies this aspect to targets a wildcard cannot reach.
+The format check is two actions. The first runs the formatter and records
+what it would change, with the new content, in a changes file
+(`changes.dart`), the `dart_format_changes` output group; the second fails when
+that file proposes anything, and its stamp is the `dart_format` group. `bazel
+run @rules_dart//dart/format` builds `dart_format_changes` over target patterns
+and writes it into the workspace, so the check and the rewrite are one
+computation and cannot disagree.
 
-The same staged project also feeds a `dart fix` action whose products sit in
-the `dart_fix_fixes` and `dart_fix_manifest` output groups, built only when
-asked for. `dart_fix` applies the aspect to its `target` and writes those
-products into the workspace, so a fix and the analysis it answers can never see
-different projects.
+The analyzer's staged project also feeds a `dart fix` action whose changes
+file is the `dart_fix_changes` group, built only when asked for; `bazel run
+@rules_dart//dart/fix` writes it, so a fix and the analysis it answers can
+never see different projects.
+
+`dart_analysis_test` applies this aspect to targets a wildcard cannot reach.
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//dart:providers.bzl", "DartAnalysisOptionsInfo", "DartAnalyzableInfo", "DartInfo")
-load("//dart/private:common.bzl", "PATH_MAPPING", "SDK_ENV", "merge_package_records", "own_package_record")
+load("//dart/private:common.bzl", "PATH_MAPPING", "SDK_ENV", "default_language_version", "merge_package_records", "own_packages")
+load("//dart/private:dart_info.bzl", "analyzed_closure")
+load("//dart/private:dart_summary.bzl", "DartSummaryAnalyzerInfo", "SUMMARIES_FLAG", "summary_analyzer_action")
 load("//dart/private:exec_groups.bzl", "PORTABLE", "PORTABLE_EXEC_GROUPS", "portable_sdk")
 load("//dart/private:project_staging.bzl", "project_layout", "pubspec_stub", "stage_dart_project", "staged_pubspec_paths")
-load("//dart/private:resources.bzl", "analysis_resources")
+load("//dart/private:resources.bzl", "source_analysis_resources")
 load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
+
+visibility("//dart/...")
 
 # Analysis and formatting run on the build machine and produce nothing for the
 # target, so they run in `PORTABLE`, whose SDK is chosen by the execution
@@ -68,26 +80,20 @@ load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
 
 _OPTIONS_BASENAME = "analysis_options.yaml"
 
-# A target carrying this tag is not analyzed; `dart_fix` can still fix it.
+# A target carrying this tag is not analyzed; `@rules_dart//dart/fix` can
+# still fix it.
 NO_ANALYZE_TAG = "no-dart-analyze"
 
-# A target carrying this tag is not format-checked; analysis is unaffected.
+# A target carrying this tag is not format-checked or formatted; analysis is
+# unaffected.
 NO_FORMAT_TAG = "no-dart-format"
 
 DartAnalysisConfigInfo = provider(
-    doc = "Every `analysis_options.yaml` in a repository, for the `dart_analyze` aspect and `dart_format`.",
+    doc = "Every `analysis_options.yaml` in a repository, for the `dart_analyze` aspect.",
     fields = {
         "options_files": "list[File]: every listed `analysis_options.yaml`, staged at its workspace path.",
         "packages": "list[DartPackageInfo]: packages the listed files `include:` by `package:` URI.",
         "files": "list[File]: those packages' sources and resources, staged for resolution only.",
-    },
-)
-
-DartFixOutputsInfo = provider(
-    doc = "The `dart fix` products the `dart_analyze` aspect computed for one target.",
-    fields = {
-        "fixes": "File: directory of changed files at their workspace-relative paths.",
-        "manifest": "File: JSON naming the fixed files and any discarded changes.",
     },
 )
 
@@ -143,8 +149,8 @@ dart_analysis_config = rule(
     },
     provides = [DartAnalysisConfigInfo],
     doc = (
-        "Lists a repository's analysis options for the `dart_analyze` aspect, " +
-        "`dart_fix` and `dart_format`. Point " +
+        "Lists a repository's analysis options for the `dart_analyze` aspect " +
+        "and the formatting and fixes it computes. Point " +
         "`@rules_dart//dart:analysis_config` at it under `common` in " +
         "`.bazelrc`."
     ),
@@ -173,13 +179,13 @@ def _wrapper_options(excluded):
             lines.append('    - "%s"' % path)
     return "\n".join(lines) + "\n"
 
-def stage_config_project(ctx, config, packages, files, own, name, sdk_version, relocatable = False):
+def stage_config_project(ctx, config, packages, files, own, name, dart_sdk_info):
     """Stages a project holding every options file `config` lists.
 
     The one place a project is laid out for options to be found in: the
-    `dart_analyze` aspect stages its target here, and `dart_format` stages the
-    same options here for `bazel run`, so a check and a run cannot see
-    different settings for the same file. Every listed `analysis_options.yaml`
+    `dart_analyze` aspect stages its target here for analysis, fixes and the
+    format check, so none of them can see different settings for the same
+    file. Every listed `analysis_options.yaml`
     sits at its workspace path under `src/`, with the packages its `include:`s
     resolve against, and the wrapper above them all ends the walk up for
     options inside the project.
@@ -193,10 +199,7 @@ def stage_config_project(ctx, config, packages, files, own, name, sdk_version, r
       own: The Files being checked; everything else staged is excluded from
         analysis, but for the options files above one of them.
       name: Prefix for the staged paths.
-      sdk_version: The toolchain SDK's version, the staged SDK constraint of a
-        package that states no `language_version`.
-      relocatable: Whether the project is read through runfiles (see
-        `stage_dart_project`).
+      dart_sdk_info: The toolchain's `DartSdkInfo` (see `pubspec_stub`).
 
     Returns:
       The `stage_dart_project` struct.
@@ -225,13 +228,12 @@ def stage_config_project(ctx, config, packages, files, own, name, sdk_version, r
     return stage_dart_project(
         ctx,
         layout,
-        relocatable = relocatable,
+        dart_sdk_info,
         extra_proj_files = {
-            "pubspec.yaml": pubspec_stub(packages, sdk_version = sdk_version),
+            "pubspec.yaml": pubspec_stub(packages, dart_sdk_info),
             _OPTIONS_BASENAME: _wrapper_options(excluded),
         },
         name = name,
-        sdk_version = sdk_version,
     )
 
 def _project_dir(src_tree):
@@ -240,35 +242,102 @@ def _project_dir(src_tree):
 def _add_project(args, staged):
     args.add_all([staged.src_tree], before_each = "--project", map_each = _project_dir, expand_directories = False)
 
-def _add_analyzer(ctx, args):
-    if not ctx.attr._analysis_shutdown_workaround[BuildSettingInfo].value:
-        args.add("--dart-cli")
+def _analyzer(ctx):
+    """How the analyze and fix actions run their analyzer.
+
+    Under `analysis_worker` (the default), in a persistent worker that keeps
+    the analysis server, hosted by `analysis_host.dart`, across requests: the
+    host is the worker's own argument, and everything else is a request's.
+    Off, a fresh `dart analyze` or `dart fix` per action.
+
+    Args:
+      ctx: The aspect's context.
+
+    Returns:
+      A struct: `startup` and `request` `Args`, the `tools` to add, and the
+      `execution_requirements`.
+    """
+    startup = ctx.actions.args()
+    request = ctx.actions.args()
+    if not ctx.attr._analysis_worker[BuildSettingInfo].value:
+        return struct(startup = startup, request = request, tools = [], execution_requirements = PATH_MAPPING)
+    startup.add("--host", ctx.file._analysis_host)
+    request.use_param_file("@%s", use_always = True)
+    request.set_param_file_format("multiline")
+    return struct(
+        startup = startup,
+        request = request,
+        tools = [ctx.file._analysis_host],
+        execution_requirements = PATH_MAPPING | {
+            "requires-worker-protocol": "proto",
+            "supports-workers": "1",
+        },
+    )
 
 def _analyze(ctx, name, staged, sdk_inputs, resource_set):
     """Declares the `dart analyze` action; returns the stamp it writes on success."""
     dart_sdk_info = portable_sdk(ctx)
     stamp = ctx.actions.declare_file(name + ".analyzed")
-    args = ctx.actions.args()
+    analyzer = _analyzer(ctx)
+    args = analyzer.request
     args.add("--dart", dart_sdk_info.dart)
     _add_project(args, staged)
     args.add("--stamp", stamp)
     args.add("--fatal-infos")
-    _add_analyzer(ctx, args)
     ctx.actions.run(
         executable = ctx.executable._analyze_tool,
-        arguments = [args],
+        arguments = [analyzer.startup, args],
         inputs = depset(direct = staged.inputs, transitive = [sdk_inputs]),
+        tools = analyzer.tools,
         outputs = [stamp],
         mnemonic = "DartAnalyze",
         exec_group = PORTABLE,
         resource_set = resource_set,
         progress_message = "Analyzing Dart sources of %{label}",
         env = SDK_ENV,
-        execution_requirements = PATH_MAPPING,
+        execution_requirements = analyzer.execution_requirements,
     )
     return stamp
 
-def _format_language_versions(info, own_paths):
+def _analyze_against_summaries(ctx, name, config, info, entry, own, analyzer, summaries):
+    """Declares the analysis of `own` against the summaries of what it depends on; returns the stamp it writes on success.
+
+    The staged project holds the target's own files, generated ones among
+    them (no summary holds a target's own parts), and the options; every
+    other library resolves from a summary, so an edit that leaves a
+    dependency's summary unchanged does not re-run this action.
+    """
+    mine = [f for f in getattr(info, "srcs", []) if not f.short_path.startswith("../")]
+    staged = stage_config_project(
+        ctx,
+        config,
+        info.transitive_packages.to_list(),
+        mine + entry + own,
+        own,
+        name + ".summaries",
+        portable_sdk(ctx),
+    )
+    stamp = ctx.actions.declare_file(name + ".analyzed")
+    args = ctx.actions.args()
+    args.add("analyze")
+    _add_project(args, staged)
+    sdk_summary = summaries.sdk or analyzer.sdk_summary
+    args.add("--sdk-summary", sdk_summary)
+    args.add_all(summaries.deps, before_each = "--summary")
+    args.add("--stamp", stamp)
+    args.add("--fatal-infos")
+    summary_analyzer_action(
+        ctx,
+        analyzer,
+        args,
+        depset(staged.inputs + [sdk_summary], transitive = [summaries.deps]),
+        [stamp],
+        "DartAnalyze",
+        "Analyzing Dart sources of %{label} against summaries",
+    )
+    return stamp
+
+def _format_language_versions(info, own_paths, default):
     """Groups a target's own files by the language version to format them at.
 
     The version is the one Dart itself would use: the version of the package
@@ -283,36 +352,50 @@ def _format_language_versions(info, own_paths):
     Args:
       info: The target's `DartInfo` closure.
       own_paths: `short_path`s of the target's own files.
+      default: The version of a package that states none
+        (`default_language_version`).
 
     Returns:
-      Dict of language version ("" when none is stated) to the paths to format
-      at it.
+      Dict of language version to the paths to format at it.
     """
-    own_package = own_package_record(info)
-    if own_package:
-        return {getattr(own_package, "language_version", ""): own_paths}
-    roots = [
+    own = own_packages(info)
+    if len(own) == 1:
+        return {own[0].language_version or default: own_paths}
+
+    # Several own packages are told apart by root like an entrypoint's.
+    roots = own or [
         p
         for p in info.transitive_packages.to_list()
-        if not p.lib_root.startswith("../")
+        if not p.package_root.startswith("../")
     ]
     groups = {}
     for path in own_paths:
         best = None
         for p in roots:
-            if p.lib_root == "" or path.startswith(p.lib_root + "/"):
-                if best == None or len(p.lib_root) > len(best.lib_root):
+            if p.package_root == "" or path.startswith(p.package_root + "/"):
+                if best == None or len(p.package_root) > len(best.package_root):
                     best = p
-        version = getattr(best, "language_version", "") if best else ""
+        version = (best.language_version if best else "") or default
         groups.setdefault(version, []).append(path)
     return groups
 
+def _label(ctx):
+    """The target's label as its user writes it: the aspect sees only this repository's."""
+    return "//%s:%s" % (ctx.label.package, ctx.label.name)
+
 def _format(ctx, name, staged, sdk_inputs, own_paths, language_version):
-    """Declares the `dart format` check; returns the stamp it writes on success.
+    """Declares a `dart format` action; returns the changes file it writes.
 
     Files are named individually rather than by handing the formatter the
-    project: the staged tree also holds dependencies and rulesets, none of
-    which are this target's to format.
+    project: the staged tree also holds the rulesets the options include,
+    none of which are this target's to format.
+
+    `staged` is a project of its own, holding the target's files and the
+    options alone. The formatter reads nothing else: its options come from the
+    walk up from each file, and its language version from the command line.
+    Staging the dependencies too, as the analyzer needs, would make an edit to
+    any of them re-run this check on every target above it, with nothing it
+    reads changed.
     """
     dart_sdk_info = portable_sdk(ctx)
     manifest = ctx.actions.declare_file(name + ".format_manifest")
@@ -320,28 +403,67 @@ def _format(ctx, name, staged, sdk_inputs, own_paths, language_version):
         output = manifest,
         content = "".join(["src/%s\n" % p for p in own_paths]),
     )
-    stamp = ctx.actions.declare_file(name + ".formatted")
+    changes = ctx.actions.declare_file(name + ".format.json")
     args = ctx.actions.args()
     args.add("--dart", dart_sdk_info.dart)
     _add_project(args, staged)
     args.add("--manifest", manifest)
-    args.add("--stamp", stamp)
+    args.add("--changes", changes)
+    args.add("--label", _label(ctx))
 
-    # Always explicit — `latest` is what the formatter would have inferred with
-    # nothing to go on, said out loud so no staged config can answer instead.
-    args.add("--language-version", language_version or "latest")
+    # Always explicit, so no staged config can answer instead.
+    args.add("--language-version", language_version)
     ctx.actions.run(
         executable = ctx.executable._format_tool,
         arguments = [args],
         inputs = depset(direct = staged.inputs + [manifest], transitive = [sdk_inputs]),
-        outputs = [stamp],
+        outputs = [changes],
         mnemonic = "DartFormat",
         exec_group = PORTABLE,
-        progress_message = "Checking Dart formatting of %{label}",
+        progress_message = "Formatting Dart sources of %{label}",
         env = SDK_ENV,
         execution_requirements = PATH_MAPPING,
     )
+    return changes
+
+def _format_check(ctx, name, changes):
+    """Declares the format check over `changes`; returns the stamp it writes when they propose nothing."""
+    stamp = ctx.actions.declare_file(name + ".formatted")
+    args = ctx.actions.args()
+    args.add_all(changes, before_each = "--changes")
+    args.add("--stamp", stamp)
+    ctx.actions.run(
+        executable = ctx.executable._format_check_tool,
+        arguments = [args],
+        inputs = changes,
+        outputs = [stamp],
+        mnemonic = "DartFormatCheck",
+        exec_group = PORTABLE,
+        progress_message = "Checking Dart formatting of %{label}",
+        execution_requirements = PATH_MAPPING,
+    )
     return stamp
+
+def _summaries(ctx, analyzer, info):
+    """`info.summaries`, failing where analysis against them cannot run.
+
+    Read from the provider the analysis stages, so a target reaches its
+    libraries' summaries however its rule came by them (through another rule
+    set's aspect, say), and an executable's analysis-only dependencies (a
+    `sky_engine`) are among them.
+    """
+    if analyzer.error != None:
+        fail(analyzer.error)
+    summaries = getattr(info, "summaries", None)
+    if summaries == None:
+        fail(("%s: its `DartInfo` was not built by `dart_info()` (or `DartAnalyzableInfo` by " +
+              "`dart_analyzable_info()`) and carries no analyzer summaries, which analysis " +
+              "against summaries (`--@rules_dart//dart:analysis_summaries`, on by default) " +
+              "reads. Build it with the constructors in `@rules_dart//dart:utils.bzl`, or " +
+              "build with %s.") % (ctx.label, SUMMARIES_FLAG))
+    if summaries.error != None:
+        fail(summaries.error)
+    return summaries
 
 def _dart_analyze_aspect_impl(target, ctx):
     # Checked here, not with `required_providers`: that matches only rules that
@@ -358,12 +480,11 @@ def _dart_analyze_aspect_impl(target, ctx):
     # external files are never checked.
     if DartAnalyzableInfo in target:
         info = target[DartAnalyzableInfo].dart_info
-        entry = target[DartAnalyzableInfo].srcs.to_list()
+        entry = target[DartAnalyzableInfo].entry_srcs.to_list()
 
         # A package's own `lib/` files, which a target's `DefaultInfo` (a web
-        # bundle, a test executable) need not list. Absent from records built
-        # against an older rules_dart.
-        package_srcs = getattr(target[DartAnalyzableInfo], "package_srcs", depset()).to_list()
+        # bundle, a test executable) need not list.
+        package_srcs = list(info.srcs)
     else:
         info = target[DartInfo]
         entry = []
@@ -377,39 +498,58 @@ def _dart_analyze_aspect_impl(target, ctx):
     own_paths = sorted([f.short_path for f in own.values()])
 
     name = ctx.label.name + ".dart_analyze"
-    srcs = info.transitive_srcs.to_list()
-    dart_files = len({f.path: None for f in srcs + entry + package_srcs if f.extension == "dart"})
-    resource_set = analysis_resources(dart_files)
+    config = ctx.attr._config[DartAnalysisConfigInfo]
+
+    # From source, the analyzer reads what compiles the target and what only
+    # it reads: a `sky_engine` named in a dependency's `analysis_deps`.
+    closure = analyzed_closure([info])
+    srcs = closure.srcs.to_list()
+
+    # What analyzing the whole program reserves (resources.bzl), by how many
+    # Dart files it can see.
+    resource_set = source_analysis_resources(len({
+        f.path: None
+        for f in srcs + entry + own.values()
+        if f.extension == "dart"
+    }))
     staged = stage_config_project(
         ctx,
-        ctx.attr._config[DartAnalysisConfigInfo],
-        info.transitive_packages.to_list(),
-        srcs + info.transitive_resources.to_list() + entry + own.values(),
+        config,
+        closure.packages.to_list(),
+        srcs + closure.resources.to_list() + entry + own.values(),
         own.values(),
         name,
-        portable_sdk(ctx).version,
+        portable_sdk(ctx),
     )
 
     dart_sdk_info = portable_sdk(ctx)
-    sdk_inputs = depset(direct = [dart_sdk_info.dart], transitive = [dart_sdk_info.tool_files])
+    sdk_inputs = dart_sdk_info.files.analyze
 
     tags = getattr(ctx.rule.attr, "tags", [])
     groups = {}
+    analyzer = ctx.attr._summary_analyzer[DartSummaryAnalyzerInfo]
     if NO_ANALYZE_TAG not in tags:
-        groups["dart_analyze"] = depset([_analyze(ctx, name, staged, sdk_inputs, resource_set)])
+        if analyzer.enabled:
+            stamp = _analyze_against_summaries(ctx, name, config, info, entry, own.values(), analyzer, _summaries(ctx, analyzer, info))
+        else:
+            stamp = _analyze(ctx, name, staged, sdk_inputs, resource_set)
+        groups["dart_analyze"] = depset([stamp])
     if NO_FORMAT_TAG not in tags:
-        by_version = _format_language_versions(info, own_paths)
-        groups["dart_format"] = depset([
+        by_version = _format_language_versions(info, own_paths, default_language_version(dart_sdk_info))
+        format_staged = stage_config_project(ctx, config, [], own.values(), own.values(), name + ".format", dart_sdk_info)
+        changes = [
             _format(
                 ctx,
-                name if len(by_version) == 1 else "%s.%s" % (name, version or "latest"),
-                staged,
-                sdk_inputs,
+                name if len(by_version) == 1 else "%s.%s" % (name, version),
+                format_staged,
+                dart_sdk_info.files.format,
                 paths,
                 version,
             )
             for version, paths in sorted(by_version.items())
-        ])
+        ]
+        groups["dart_format_changes"] = depset(changes)
+        groups["dart_format"] = depset([_format_check(ctx, name, changes)])
 
     # Write-back is limited to the target's own hand-written files, decided
     # from Bazel's record of what each file is rather than from its name:
@@ -420,48 +560,50 @@ def _dart_analyze_aspect_impl(target, ctx):
         output = eligible,
         content = "".join(["src/%s\t%s\n" % (p, p) for p in own_paths]),
     )
-    fixes = ctx.actions.declare_directory(name + ".fixes")
-    manifest = ctx.actions.declare_file(name + ".fix_manifest.json")
+    fix_changes = ctx.actions.declare_file(name + ".fix.json")
     scratch = ctx.actions.declare_directory(name + ".scratch")
-    fix_args = ctx.actions.args()
+    fix_analyzer = _analyzer(ctx)
+    fix_args = fix_analyzer.request
     fix_args.add("--dart", dart_sdk_info.dart)
     _add_project(fix_args, staged)
     fix_args.add_all([scratch], before_each = "--scratch", expand_directories = False)
-    fix_args.add_all([fixes], before_each = "--fixes", expand_directories = False)
-    fix_args.add("--manifest", manifest)
+    fix_args.add("--changes", fix_changes)
+    fix_args.add("--label", _label(ctx))
     fix_args.add("--eligible", eligible)
-    _add_analyzer(ctx, fix_args)
     ctx.actions.run(
         executable = ctx.executable._fix_tool,
-        arguments = [fix_args],
+        arguments = [fix_analyzer.startup, fix_args],
         inputs = depset(direct = staged.inputs + [eligible], transitive = [sdk_inputs]),
-        outputs = [fixes, manifest, scratch],
+        tools = fix_analyzer.tools,
+        outputs = [fix_changes, scratch],
         mnemonic = "DartFix",
         exec_group = PORTABLE,
         resource_set = resource_set,
         progress_message = "Computing Dart fixes for %{label}",
         env = SDK_ENV,
-        execution_requirements = PATH_MAPPING,
+        execution_requirements = fix_analyzer.execution_requirements,
     )
 
-    return [
-        OutputGroupInfo(
-            dart_fix_fixes = depset([fixes]),
-            dart_fix_manifest = depset([manifest]),
-            **groups
-        ),
-        DartFixOutputsInfo(fixes = fixes, manifest = manifest),
-    ]
+    return [OutputGroupInfo(dart_fix_changes = depset([fix_changes]), **groups)]
 
 dart_analyze = aspect(
     implementation = _dart_analyze_aspect_impl,
     attrs = {
+        "_summary_analyzer": attr.label(
+            default = "//dart/private:summary_analyzer",
+            providers = [DartSummaryAnalyzerInfo],
+            cfg = config.exec(PORTABLE),
+        ),
         "_config": attr.label(
             default = "//dart:analysis_config",
             providers = [DartAnalysisConfigInfo],
         ),
-        "_analysis_shutdown_workaround": attr.label(
-            default = "//dart:analysis_shutdown_workaround",
+        "_analysis_host": attr.label(
+            default = "//dart/private/tools:analysis_host.dart",
+            allow_single_file = True,
+        ),
+        "_analysis_worker": attr.label(
+            default = "//dart:analysis_worker",
         ),
         "_analyze_tool": attr.label(
             default = "//dart/private/tools:analyze_runner",
@@ -478,8 +620,13 @@ dart_analyze = aspect(
             executable = True,
             cfg = config.exec(PORTABLE),
         ),
+        "_format_check_tool": attr.label(
+            default = "//dart/private/tools:format_check",
+            executable = True,
+            cfg = config.exec(PORTABLE),
+        ),
     },
     toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
     exec_groups = PORTABLE_EXEC_GROUPS,
-    doc = "Runs `dart analyze` and `dart format` on a Dart target's own files; see `@rules_dart//dart:analyze.bzl`.",
+    doc = "Runs `dart analyze` and `dart format` on a Dart target's own files, and computes their fixes; see `@rules_dart//dart:analyze.bzl`.",
 )

@@ -1,0 +1,62 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+load("@rules_dart//dart/ext/drift:defs.bzl", "drift_codegen")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "drift_fixture",
+    language_version = "3.11",
+)
+
+# Comprehensive e2e for drift:
+#  - .drift file include (todos + `AS Todo` data class + `allTodos` query)
+#  - Dart-only tables (Users, Posts) with FK + TypeConverter + default
+#  - @DriftAccessor DAO (PostsDao)
+#  - Multi-table join in a .drift named query (postsByUser)
+#  - drift options (`config`), as build.yaml states them for `drift_dev`
+#
+# drift_codegen handles the full 4-stage pipeline (prep + discover +
+# analyzer + driftBuilder) plus combining per source.
+
+drift_codegen(
+    name = "drift_codegen",
+    srcs = [
+        "lib/database.dart",
+        "lib/posts_dao.dart",
+    ],
+    config = "{\"store_date_time_values_as_text\": true}",
+    drift_srcs = ["lib/database.drift"],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "drift_fixture",
+    srcs = [
+        "lib/database.dart",
+        "lib/posts_dao.dart",
+        ":drift_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:drift"],
+)
+
+# drift's NativeDatabase uses package:sqlite3, whose @Native bindings need a
+# libsqlite3 at runtime. This test names NO code_assets: `pub.from_lock()`
+# attaches rules_dart's curated libsqlite3 to the `sqlite3` spoke itself, and
+# it propagates here through drift's dependency on it — the test
+# source stays plain `NativeDatabase.memory()`, no dart:ffi.
+dart_test(
+    name = "database_test",
+    size = "small",
+    main = "test/database_test.dart",
+    deps = [
+        ":drift_fixture",
+        "@pub_deps//:drift",
+        "@pub_deps//:test",
+    ],
+)

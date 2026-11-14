@@ -1,0 +1,86 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("//dart:toolchain.bzl", "dart_outline_toolchain")
+load("//dart/private:dart_module.bzl", "vm_kernel_sdk")
+load(":rules.bzl", "refuses_no_tool_test", "refuses_other_version_test")
+
+# The VM's kernel SDK with outlines on, given an outline toolchain that does not
+# fit its Dart toolchain: each is an error naming the flag that turns outlines
+# off, never compiles without them.
+vm_kernel_sdk(
+    name = "sdk",
+    outlines = True,
+    tags = ["manual"],
+)
+
+dart_outline_toolchain(
+    name = "other_version",
+    tool = "@dart_kernel_source//:outline_tool",
+    version = "0.0.0",
+)
+
+toolchain(
+    name = "other_version_toolchain",
+    toolchain = ":other_version",
+    toolchain_type = "//dart:outline_toolchain_type",
+)
+
+refuses_other_version_test(
+    name = "refuses_other_version_test",
+    size = "small",
+    target_under_test = ":sdk",
+)
+
+dart_outline_toolchain(
+    name = "no_tool",
+    version = "0.0.0",
+)
+
+toolchain(
+    name = "no_tool_toolchain",
+    toolchain = ":no_tool",
+    toolchain_type = "//dart:outline_toolchain_type",
+)
+
+refuses_no_tool_test(
+    name = "refuses_no_tool_test",
+    size = "small",
+    target_under_test = ":sdk",
+)
+
+# The stripper built on a checkout of the pinned release
+# (`dart_kernel_source(path = ...)`, `//dart/tests:kernel_checkout.bzl`), in
+# place of the one the `dart` extension registers. The outline guard passes with
+# it: `bazel test --config=deep --extra_toolchains=//dart/tests/outline_toolchain_fixture:checkout_toolchain //dart/tests/outline_fixture:outline_guard_test`.
+dart_outline_toolchain(
+    name = "checkout",
+    tool = "@kernel_checkout_source//:outline_tool",
+    version = "3.13.7",
+)
+
+toolchain(
+    name = "checkout_toolchain",
+    toolchain = ":checkout",
+    toolchain_type = "//dart:outline_toolchain_type",
+)
+
+# The same through `fetch_dart_kernel_source` with a prefix, from a repository
+# that has a root package of its own. Run the guard with
+# `--extra_toolchains=//dart/tests/outline_toolchain_fixture:prefixed_toolchain`.
+dart_outline_toolchain(
+    name = "prefixed",
+    tool = "@kernel_prefixed_source//kernel_source:outline_tool",
+    version = "3.13.7",
+)
+
+toolchain(
+    name = "prefixed_toolchain",
+    toolchain = ":prefixed",
+    toolchain_type = "//dart:outline_toolchain_type",
+)
+
+bzl_library(
+    name = "rules",
+    srcs = ["rules.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["@bazel_skylib//lib:unittest"],
+)

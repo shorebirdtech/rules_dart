@@ -1,7 +1,7 @@
 """Unit tests for yaml_parser.bzl."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//dart/pub:yaml_parser.bzl", "parse_pubspec_deps", "parse_pubspec_lock", "parse_pubspec_sdk_constraint")
+load("//dart/pub:yaml_parser.bzl", "lock_error", "parse_pubspec_lock")
 load(":small_suite.bzl", "small_unittest_suite")
 
 _SAMPLE_LOCK = """\
@@ -35,7 +35,7 @@ sdks:
 
 def _parse_lock_packages_test_impl(ctx):
     env = unittest.begin(ctx)
-    result = parse_pubspec_lock(_SAMPLE_LOCK)
+    result = parse_pubspec_lock(_SAMPLE_LOCK, "sample")
     asserts.equals(env, 3, len(result))
     asserts.true(env, "collection" in result)
     asserts.true(env, "meta" in result)
@@ -44,7 +44,7 @@ def _parse_lock_packages_test_impl(ctx):
 
 def _parse_lock_hosted_test_impl(ctx):
     env = unittest.begin(ctx)
-    result = parse_pubspec_lock(_SAMPLE_LOCK)
+    result = parse_pubspec_lock(_SAMPLE_LOCK, "sample")
     collection = result["collection"]
     asserts.equals(env, "hosted", collection["source"])
     asserts.equals(env, "1.18.0", collection["version"])
@@ -54,56 +54,84 @@ def _parse_lock_hosted_test_impl(ctx):
 
 def _parse_lock_sdk_test_impl(ctx):
     env = unittest.begin(ctx)
-    result = parse_pubspec_lock(_SAMPLE_LOCK)
+    result = parse_pubspec_lock(_SAMPLE_LOCK, "sample")
     flutter = result["flutter"]
     asserts.equals(env, "sdk", flutter["source"])
     asserts.equals(env, "0.0.0", flutter["version"])
     return unittest.end(env)
 
-_SAMPLE_PUBSPEC = """\
-name: my_app
-version: 1.0.0
-environment:
-  sdk: ">=3.0.0 <4.0.0"
-dependencies:
-  collection: ^1.18.0
-  path: ^1.9.0
-dev_dependencies:
-  test: ^1.24.0
-"""
+_DUPLICATE_PACKAGE_LOCK = _SAMPLE_LOCK.replace("sdks:", """\
+  meta:
+    dependency: transitive
+    description:
+      name: meta
+      sha256: 0123
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.0.0"
+sdks:""")
 
-def _parse_pubspec_deps_test_impl(ctx):
+def _lock_error_test_impl(ctx):
     env = unittest.begin(ctx)
-    result = parse_pubspec_deps(_SAMPLE_PUBSPEC)
-    asserts.equals(env, 2, len(result))
-    asserts.true(env, "collection" in result)
-    asserts.true(env, "path" in result)
 
-    # dev_dependencies should NOT be included
-    asserts.true(env, "test" not in result)
+    # A lock pub accepts has no error.
+    asserts.equals(env, None, lock_error(_SAMPLE_LOCK))
+
+    # A package listed twice is a duplicate key, which pub refuses.
+    duplicate = lock_error(_DUPLICATE_PACKAGE_LOCK)
+    asserts.true(env, duplicate != None and "meta" in duplicate, "duplicate package: %s" % duplicate)
+
+    # A second document is refused, not ignored.
+    second = lock_error(_SAMPLE_LOCK + "---\npackages: {}\n")
+    asserts.true(env, second != None and "2 YAML documents" in second, "second document: %s" % second)
+
+    # A key twice in a package's own entry.
+    key_twice = lock_error(_SAMPLE_LOCK.replace("    source: sdk\n", "    source: sdk\n    source: hosted\n"))
+    asserts.true(env, key_twice != None and "source" in key_twice, "duplicate key: %s" % key_twice)
     return unittest.end(env)
 
-def _parse_pubspec_deps_empty_test_impl(ctx):
-    env = unittest.begin(ctx)
-    result = parse_pubspec_deps("name: empty\n")
-    asserts.equals(env, 0, len(result))
-    return unittest.end(env)
+def _expect_refused(env, content, *fragments):
+    problem = lock_error(content)
+    asserts.true(env, problem != None, "accepted:\n" + content)
+    for fragment in fragments:
+        asserts.true(env, problem != None and fragment in problem, "expected {} in {}".format(repr(fragment), repr(problem)))
 
-def _parse_pubspec_sdk_constraint_test_impl(ctx):
+def _lock_shape_test_impl(ctx):
     env = unittest.begin(ctx)
-    asserts.equals(env, ">=3.0.0 <4.0.0", parse_pubspec_sdk_constraint(_SAMPLE_PUBSPEC))
-    asserts.equals(env, "^3.5.0", parse_pubspec_sdk_constraint("environment:\n  sdk: ^3.5.0\n"))
-    asserts.equals(env, "^3.5.0", parse_pubspec_sdk_constraint("environment:\n  sdk: '^3.5.0'\n"))
-    asserts.equals(env, "", parse_pubspec_sdk_constraint("name: x\n"))
-    asserts.equals(env, "", parse_pubspec_sdk_constraint(""))
+
+    # What pub reads as a lock with no packages.
+    asserts.equals(env, {}, parse_pubspec_lock("", "empty"))
+    asserts.equals(env, {}, parse_pubspec_lock("  \n", "blank"))
+    asserts.equals(env, {}, parse_pubspec_lock("sdks:\n  dart: \">=3.0.0 <4.0.0\"\n", "no packages"))
+    asserts.equals(env, {}, parse_pubspec_lock("packages: {}\n", "empty packages"))
+
+    # What pub refuses, where a lenient read gives an empty hub or skips a
+    # package.
+    _expect_refused(env, "# only a comment\n", "top level is not a mapping")
+    _expect_refused(env, "- packages\n", "top level is not a mapping")
+    _expect_refused(env, "packages:\n", "`packages` is not a mapping")
+    _expect_refused(env, "packages: [a]\n", "`packages` is not a mapping")
+    _expect_refused(env, "packages:\n  foo: 1.0.0\n", "package `foo` is not a mapping")
+
+    flutter = "    source: sdk\n    version: \"0.0.0\"\n"
+    _expect_refused(env, _SAMPLE_LOCK.replace(flutter, "    source: sdk\n"), "package `flutter` has no `version`")
+    _expect_refused(env, _SAMPLE_LOCK.replace(flutter, "    source: sdk\n    version: \"1.10\"\n"), "package `flutter` has no `version`", "1.10")
+    _expect_refused(env, _SAMPLE_LOCK.replace(flutter, "    source: sdk\n    version: 1.10\n"), "package `flutter` has no `version`")
+    _expect_refused(env, _SAMPLE_LOCK.replace(flutter, "    version: \"0.0.0\"\n"), "package `flutter` has no `source`")
+    _expect_refused(env, _SAMPLE_LOCK.replace(flutter, "    source: [sdk]\n    version: \"0.0.0\"\n"), "package `flutter` has no `source`")
+
+    # pub reads an entry from a source it does not know, and fails only for
+    # what needs it.
+    asserts.equals(env, "svn", parse_pubspec_lock(_SAMPLE_LOCK.replace("    source: sdk\n", "    source: svn\n"), "unknown source")["flutter"]["source"])
+    _expect_refused(env, _SAMPLE_LOCK.replace("    description: flutter\n", ""), "package `flutter` has no `description`")
+    _expect_refused(env, _SAMPLE_LOCK.replace("    dependency: transitive\n", "    dependency: [transitive]\n"), "package `meta` has a `dependency`")
     return unittest.end(env)
 
 _t0_test = unittest.make(_parse_lock_packages_test_impl)
 _t1_test = unittest.make(_parse_lock_hosted_test_impl)
 _t2_test = unittest.make(_parse_lock_sdk_test_impl)
-_t3_test = unittest.make(_parse_pubspec_deps_test_impl)
-_t4_test = unittest.make(_parse_pubspec_deps_empty_test_impl)
-_t5_test = unittest.make(_parse_pubspec_sdk_constraint_test_impl)
+_t3_test = unittest.make(_lock_error_test_impl)
+_t4_test = unittest.make(_lock_shape_test_impl)
 
 def yaml_parser_test_suite(name):
-    small_unittest_suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test, _t5_test)
+    small_unittest_suite(name, _t0_test, _t1_test, _t2_test, _t3_test, _t4_test)

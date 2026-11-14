@@ -1,0 +1,28 @@
+load("@rules_dart//dart:defs.bzl", "dart_package_cycle", "dart_test")
+
+# `order` and `customer` import each other, and each has a model whose
+# generated code needs a type of the other. Each generator reads both members'
+# sources; the cycle holds what they write.
+dart_package_cycle(
+    name = "shop",
+    srcs = [
+        "//builders/json_serializable/cycle/customer:codegen",
+        "//builders/json_serializable/cycle/order:codegen",
+    ],
+    members = [
+        "//builders/json_serializable/cycle/customer:member",
+        "//builders/json_serializable/cycle/order:member",
+    ],
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:json_annotation"],
+)
+
+dart_test(
+    name = "cycle_test",
+    size = "small",
+    main = "test/cycle_test.dart",
+    deps = [
+        ":shop",
+        "@pub_deps//:test",
+    ],
+)

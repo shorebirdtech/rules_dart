@@ -3,17 +3,33 @@
 # Each subdirectory hosts the shim binary + convenience macro for one
 # pub.dev builder (json_serializable, freezed, …). See docs/ext.md.
 
-load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("//dart:defs.bzl", "dart_library", "dart_test")
+load("@bazel_lib//:bzl_library.bzl", "bzl_library")
+load("//dart:defs.bzl", "dart_package_metadata", "dart_test")
+load("//tool:starlark_docs.bzl", "starlark_docs_test")
+load(":defs.bzl", "builder_shim_library")
 
 exports_files(
-    ["pubspec.lock"],
+    [
+        "lib/builder_shim.dart",
+        "lib/src/declared_file_system.dart",
+        "lib/worker_entry.dart",
+        "pubspec.lock",
+    ],
     visibility = ["//visibility:public"],
+)
+
+# The public API for writing a builder's shim and macro, which rules_dart's own
+# builders use and other rule sets use for theirs. See docs/ext.md.
+bzl_library(
+    name = "defs",
+    srcs = ["defs.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart:defs"],
 )
 
 # The curated-registry resolver is supported API for other rule sets:
 # rules_flutter generates its own pub spokes and so cannot reach the registry
-# through `pub_lock_package`. Only the two functions are supported; `_ENTRIES`
+# through `pub_lock_package`. Only its functions are supported; `_ENTRIES`
 # stays private (see registry.bzl).
 bzl_library(
     name = "registry",
@@ -22,26 +38,21 @@ bzl_library(
     deps = ["//dart/pub:defs"],
 )
 
-# Shim-runner library — used by every per-builder shim binary in dart/ext/<*>/.
-dart_library(
-    name = "builder_shim",
+dart_package_metadata(
+    name = "pubspec-metadata",
     package_name = "rules_dart_ext",
-    srcs = [
-        "lib/builder_shim.dart",
-        "lib/worker_entry.dart",
-    ],
-    language_version = "3.11",
-    visibility = ["//dart/ext:__subpackages__"],
-    deps = [
-        "@ext_pub_deps//:analyzer",
-        "@ext_pub_deps//:args",
-        "@ext_pub_deps//:bazel_worker",
-        "@ext_pub_deps//:build",
-        "@ext_pub_deps//:crypto",
-        "@ext_pub_deps//:glob",
-        "@ext_pub_deps//:logging",
-        "@ext_pub_deps//:package_config",
-        "@ext_pub_deps//:path",
+    language_version = "3.12",
+    visibility = ["//visibility:public"],
+)
+
+# The shim runner every per-builder shim binary in dart/ext/<*>/ links. Other
+# rule sets build it against their own pub hub (`builder_shim_library`).
+builder_shim_library(
+    name = "builder_shim",
+    pub_hub = "@ext_pub_deps",
+    visibility = [
+        "//dart/ext:__subpackages__",
+        "//dart/tests:__subpackages__",
     ],
 )
 
@@ -59,3 +70,6 @@ dart_test(
         "@ext_pub_deps//:test",
     ],
 )
+
+# Every public symbol of this package's .bzl files is documented.
+starlark_docs_test(name = "docs_test")

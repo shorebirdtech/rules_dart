@@ -1,0 +1,25 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "glyphs",
+    link_hook = "hook/link.dart",
+    link_hook_assets = ["package:glyphs/glyphs/index.json"],
+)
+
+# A package with a link hook: `hook/link.dart` reads the recorded uses of
+# `Glyph` and always emits `package:glyphs/glyphs/index.json`, which the
+# metadata states. The hook's own imports
+# are ordinary dependencies of the package, as pub requires.
+dart_library(
+    name = "glyphs",
+    srcs = glob(["lib/**/*.dart"]),
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@pub_deps//:data_assets",
+        "@pub_deps//:hooks",
+        "@pub_deps//:meta",
+        "@pub_deps//:record_use",
+    ],
+)

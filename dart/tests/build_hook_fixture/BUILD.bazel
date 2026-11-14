@@ -1,0 +1,104 @@
+"""Fixtures for the `analysistest`s in `//dart/tests:build_hook_test.bzl`.
+
+A first-party package whose `dart_package_metadata` states its
+`hook/build.dart` with `build_hook`: nothing
+here is built, every target an assertion reads is tagged `manual`.
+"""
+
+load("//dart:defs.bzl", "dart_binary", "dart_library", "dart_package_metadata", "dart_test")
+load(
+    "//dart/tests:build_hook_test.bzl",
+    "records_build_hook_test",
+    "unreplaced_build_hook_test",
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "build_hook_fixture",
+    build_hook = "hook/build.dart",
+    tags = ["manual"],
+)
+
+dart_library(
+    name = "hooked",
+    srcs = ["lib/native.dart"],
+    package = ":pubspec-metadata",
+    tags = ["manual"],
+)
+
+records_build_hook_test(
+    name = "records_build_hook_test",
+    size = "small",
+    expected = "hook/build.dart",
+    target_under_test = ":hooked",
+)
+
+dart_binary(
+    name = "hooked_bin",
+    main = "main.dart",
+    tags = ["manual"],
+    deps = [":hooked"],
+)
+
+unreplaced_build_hook_test(
+    name = "binary_refuses_unreplaced_hook_test",
+    size = "small",
+    target_under_test = ":hooked_bin",
+)
+
+dart_test(
+    name = "hooked_test",
+    main = "main.dart",
+    tags = ["manual"],
+    deps = [":hooked"],
+)
+
+unreplaced_build_hook_test(
+    name = "test_refuses_unreplaced_hook_test",
+    size = "small",
+    target_under_test = ":hooked_test",
+)
+
+# The package split across targets, as Gazelle's per-directory and
+# import-cycle layouts write it. Every target names the one declaration, so a
+# program reaching only the target without the hooked file still sees the hook.
+dart_library(
+    name = "plain",
+    srcs = ["lib/plain.dart"],
+    package = ":pubspec-metadata",
+    tags = ["manual"],
+)
+
+dart_library(
+    name = "split",
+    srcs = ["lib/native.dart"],
+    package = ":pubspec-metadata",
+    tags = ["manual"],
+    deps = [":plain"],
+)
+
+dart_binary(
+    name = "split_bin",
+    main = "main.dart",
+    tags = ["manual"],
+    deps = [":split"],
+)
+
+unreplaced_build_hook_test(
+    name = "split_package_refuses_unreplaced_hook_test",
+    size = "small",
+    target_under_test = ":split_bin",
+)
+
+dart_binary(
+    name = "plain_bin",
+    main = "main.dart",
+    tags = ["manual"],
+    deps = [":plain"],
+)
+
+unreplaced_build_hook_test(
+    name = "unhooked_target_refuses_unreplaced_hook_test",
+    size = "small",
+    target_under_test = ":plain_bin",
+)

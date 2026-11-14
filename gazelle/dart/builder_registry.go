@@ -2,7 +2,6 @@ package dart
 
 import (
 	"log"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -23,12 +22,12 @@ type builderInfo struct {
 
 	// ShimLabel is the absolute label of the per-builder shim binary
 	// (e.g. "@rules_dart//dart/ext/json_serializable:shim"). Used as
-	// `generator_bin` on the emitted dart_codegen / dart_aggregate_codegen.
+	// `generator` on the emitted dart_codegen.
 	ShimLabel string
 
 	// Macro is the loadable symbol for the convenience macro Gazelle emits
 	// for single-annotation files (e.g.
-	// "@rules_dart//dart/ext/json_serializable:defs.bzl%json_serializable_library").
+	// "@rules_dart//dart/ext/json_serializable:defs.bzl%json_serializable_codegen").
 	Macro string
 
 	// Produces is the list of file extensions emitted (e.g. [".g.dart"] or
@@ -52,9 +51,20 @@ type builderInfo struct {
 	// `dart_library.deps` (set via `dart_builder_runtime_dep` directive).
 	RuntimeDep string
 
-	// Config is a JSON string of builder options (set via
-	// `dart_builder_config` directive).
+	// Config is a JSON string of builder options, set by the
+	// `dart_builder_config` directive or by the package's build.yaml
+	// (build_yaml.go).
 	Config string
+
+	// Key is the builder's key in build_runner's `build.yaml`
+	// (`<package>:<builder>`), whose `options` there become Config. Empty
+	// for a builder whose options Gazelle cannot carry into its targets.
+	Key string
+
+	// defaultRuntimeDep is the RuntimeDep the registration states, before
+	// any `dart_builder_runtime_dep` directive: its macro's default
+	// `annotation_dep`.
+	defaultRuntimeDep string
 }
 
 // clone returns a shallow copy of this builderInfo. Slice fields are
@@ -97,27 +107,19 @@ const extKeyBuilderRegistry = "dart_builder_registry"
 // via Gazelle's shallow `c.Exts` copy.
 //
 // If no registry is present, a fresh one is created and pre-populated with
-// the rules_dart-shipped defaults.
+// the registered builders: the rules_dart-shipped defaults and those the
+// repository root's `dart_builder` directives register (external.go).
 func builderRegistryOf(c *config.Config) *builderRegistry {
 	if c.Exts == nil {
 		c.Exts = map[string]interface{}{}
 	}
 	if existing, ok := c.Exts[extKeyBuilderRegistry].(*builderRegistry); ok {
-		clone := &builderRegistry{
-			byAnnotation: make(map[string][]*builderInfo, len(existing.byAnnotation)),
-		}
-		for ann, infos := range existing.byAnnotation {
-			cloned := make([]*builderInfo, 0, len(infos))
-			for _, info := range infos {
-				cloned = append(cloned, info.clone())
-			}
-			clone.byAnnotation[ann] = cloned
-		}
+		clone := existing.clone()
 		c.Exts[extKeyBuilderRegistry] = clone
 		return clone
 	}
 	r := &builderRegistry{byAnnotation: map[string][]*builderInfo{}}
-	for _, info := range defaultBuilders() {
+	for _, info := range registeredBuilders(c) {
 		r.byAnnotation[info.Annotation] = append(
 			r.byAnnotation[info.Annotation],
 			info.clone(),
@@ -127,6 +129,39 @@ func builderRegistryOf(c *config.Config) *builderRegistry {
 	return r
 }
 
+// keys is the build.yaml keys of the registry's builders, those whose
+// options Gazelle carries into their targets.
+func (r *builderRegistry) keys() map[string]bool {
+	m := map[string]bool{}
+	if r == nil {
+		return m
+	}
+	for _, infos := range r.byAnnotation {
+		for _, b := range infos {
+			if b.Key != "" {
+				m[b.Key] = true
+			}
+		}
+	}
+	return m
+}
+
+// clone returns a deep copy of the registry, whose builderInfos can be
+// changed without changing this one's.
+func (r *builderRegistry) clone() *builderRegistry {
+	out := &builderRegistry{
+		byAnnotation: make(map[string][]*builderInfo, len(r.byAnnotation)),
+	}
+	for ann, infos := range r.byAnnotation {
+		cloned := make([]*builderInfo, 0, len(infos))
+		for _, info := range infos {
+			cloned = append(cloned, info.clone())
+		}
+		out.byAnnotation[ann] = cloned
+	}
+	return out
+}
+
 // defaultBuilders returns the rules_dart-shipped registrations for the
 // bundled `dart/ext/<builder>` shims. Most annotations register exactly
 // one builderInfo; `@StackedApp` registers five (one per stacked
@@ -134,11 +169,20 @@ func builderRegistryOf(c *config.Config) *builderRegistry {
 //
 // Keep this list aligned with `dart/ext/`'s subdirectories.
 func defaultBuilders() []*builderInfo {
+	builders := shippedBuilders()
+	for _, b := range builders {
+		b.defaultRuntimeDep = b.RuntimeDep
+	}
+	return builders
+}
+
+func shippedBuilders() []*builderInfo {
 	return []*builderInfo{
 		{
 			Annotation: "JsonSerializable",
 			ShimLabel:  "@rules_dart//dart/ext/json_serializable:shim",
-			Macro:      "@rules_dart//dart/ext/json_serializable:defs.bzl%json_serializable_library",
+			Key:        "json_serializable:json_serializable",
+			Macro:      "@rules_dart//dart/ext/json_serializable:defs.bzl%json_serializable_codegen",
 			Produces:   []string{".json_serializable.g.part"},
 			Consumes:   []string{".dart"},
 			SharedPart: true,
@@ -151,7 +195,8 @@ func defaultBuilders() []*builderInfo {
 			// annotation maps here too.
 			Annotation: "BuiltValue",
 			ShimLabel:  "@rules_dart//dart/ext/built_value:shim",
-			Macro:      "@rules_dart//dart/ext/built_value:defs.bzl%built_value_library",
+			Key:        "built_value_generator:built_value",
+			Macro:      "@rules_dart//dart/ext/built_value:defs.bzl%built_value_codegen",
 			Produces:   []string{".built_value.g.part"},
 			Consumes:   []string{".dart"},
 			SharedPart: true,
@@ -163,7 +208,8 @@ func defaultBuilders() []*builderInfo {
 			// serializers.dart); same builder as BuiltValue.
 			Annotation: "SerializersFor",
 			ShimLabel:  "@rules_dart//dart/ext/built_value:shim",
-			Macro:      "@rules_dart//dart/ext/built_value:defs.bzl%built_value_library",
+			Key:        "built_value_generator:built_value",
+			Macro:      "@rules_dart//dart/ext/built_value:defs.bzl%built_value_codegen",
 			Produces:   []string{".built_value.g.part"},
 			Consumes:   []string{".dart"},
 			SharedPart: true,
@@ -176,7 +222,8 @@ func defaultBuilders() []*builderInfo {
 			// registry lookup (see canonicalAnnotationName).
 			Annotation: "Freezed",
 			ShimLabel:  "@rules_dart//dart/ext/freezed:shim",
-			Macro:      "@rules_dart//dart/ext/freezed:defs.bzl%freezed_library",
+			Key:        "freezed:freezed",
+			Macro:      "@rules_dart//dart/ext/freezed:defs.bzl%freezed_codegen",
 			Produces:   []string{".freezed.dart"},
 			Consumes:   []string{".dart"},
 			RunsBefore: []string{"JsonSerializable"},
@@ -185,7 +232,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "CopyWith",
 			ShimLabel:  "@rules_dart//dart/ext/copy_with_extension_gen:shim",
-			Macro:      "@rules_dart//dart/ext/copy_with_extension_gen:defs.bzl%copy_with_library",
+			Key:        "copy_with_extension_gen:copy_with_extension_gen",
+			Macro:      "@rules_dart//dart/ext/copy_with_extension_gen:defs.bzl%copy_with_codegen",
 			Produces:   []string{".copy_with_extension_gen.g.part"},
 			Consumes:   []string{".dart"},
 			SharedPart: true,
@@ -194,24 +242,17 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "GenerateMocks",
 			ShimLabel:  "@rules_dart//dart/ext/mockito:shim",
-			Macro:      "@rules_dart//dart/ext/mockito:defs.bzl%mockito_library",
+			Key:        "mockito:mockBuilder",
+			Macro:      "@rules_dart//dart/ext/mockito:defs.bzl%mockito_codegen",
 			Produces:   []string{".mocks.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:mockito",
 		},
 		{
-			Annotation: "TypedGoRoute",
-			ShimLabel:  "@rules_dart//dart/ext/go_router:shim",
-			Macro:      "@rules_dart//dart/ext/go_router:defs.bzl%go_router_library",
-			Produces:   []string{".go_router.g.part"},
-			Consumes:   []string{".dart"},
-			SharedPart: true,
-			RuntimeDep: "@pub_deps//:go_router",
-		},
-		{
 			Annotation: "DriftDatabase",
 			ShimLabel:  "@rules_dart//dart/ext/drift:shim_drift",
-			Macro:      "@rules_dart//dart/ext/drift:defs.bzl%drift_library",
+			Key:        "drift_dev:drift_dev",
+			Macro:      "@rules_dart//dart/ext/drift:defs.bzl%drift_codegen",
 			Produces:   []string{".drift.g.part"},
 			Consumes:   []string{".dart"},
 			SharedPart: true,
@@ -224,7 +265,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "StackedApp",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_router",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_router_library",
+			Key:        "stacked_generator:stackedRouterGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_router_codegen",
 			Produces:   []string{".router.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -232,7 +274,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "StackedApp",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_locator",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_locator_library",
+			Key:        "stacked_generator:stackedLocatorGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_locator_codegen",
 			Produces:   []string{".locator.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -240,7 +283,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "StackedApp",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_logger",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_logger_library",
+			Key:        "stacked_generator:stackedLoggerGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_logger_codegen",
 			Produces:   []string{".logger.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -248,7 +292,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "StackedApp",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_dialog",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_dialog_library",
+			Key:        "stacked_generator:stackedDialogGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_dialog_codegen",
 			Produces:   []string{".dialogs.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -256,7 +301,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "StackedApp",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_bottomsheet",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_bottomsheet_library",
+			Key:        "stacked_generator:stackedBottomsheetGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_bottomsheet_codegen",
 			Produces:   []string{".bottomsheets.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -264,7 +310,8 @@ func defaultBuilders() []*builderInfo {
 		{
 			Annotation: "FormView",
 			ShimLabel:  "@rules_dart//dart/ext/stacked:shim_form",
-			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_form_library",
+			Key:        "stacked_generator:stackedFormGenerator",
+			Macro:      "@rules_dart//dart/ext/stacked:defs.bzl%stacked_form_codegen",
 			Produces:   []string{".form.dart"},
 			Consumes:   []string{".dart"},
 			RuntimeDep: "@pub_deps//:stacked",
@@ -274,7 +321,8 @@ func defaultBuilders() []*builderInfo {
 
 // configureBuilderDirectives merges `dart_builder_runtime_dep` and
 // `dart_builder_config` directives from f into the registry on c. These
-// directives configure *built-in* builders; they do not register new ones.
+// directives configure registered builders; `dart_builder` registers one, at
+// the repository's root only (external.go).
 //
 // Idempotent within a directory: re-declaring an annotation overwrites the
 // prior directive value. Applies to every registered builderInfo for the
@@ -308,27 +356,6 @@ func configureBuilderDirectives(c *config.Config, f *rule.File) {
 			}
 		}
 	}
-}
-
-// allRegisteredProducedExtensions returns every output extension declared
-// by every registered builder, sorted lexicographically for deterministic
-// callers. Used by generate.go to suppress generating rules for files
-// whose names look like codegen outputs.
-func (r *builderRegistry) allRegisteredProducedExtensions() []string {
-	seen := map[string]struct{}{}
-	var out []string
-	for _, infos := range r.byAnnotation {
-		for _, b := range infos {
-			for _, ext := range b.Produces {
-				if _, ok := seen[ext]; !ok {
-					seen[ext] = struct{}{}
-					out = append(out, ext)
-				}
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
 }
 
 // lookup returns every builderInfo that watches `annotation`. Most

@@ -1,12 +1,12 @@
-load("//dart:defs.bzl", "dart_binary", "dart_code_asset", "dart_library")
+load("//dart:defs.bzl", "dart_code_asset", "dart_library", "dart_package_metadata")
 load(
     "//dart/tests:dart_info_test.bzl",
+    "analyzable_no_package_test",
     "analyzable_with_package_test",
-    "dir_library",
+    "bare_executable",
+    "entry_srcs_under_lib_test",
     "facade_library",
     "forwards_closures_test",
-    "gen_dart_dir",
-    "import_check_inputs_test",
     "language_version_passthrough_test",
     "misowned_asset_test",
     "no_package_empty_test",
@@ -22,14 +22,19 @@ load(
 dart_code_asset(
     name = "dep_asset",
     asset_id = "package:info_dep/src/ffi/dep.g.dart",
-    shared_library = "//dart/tests/cc_fixture:empty_shared",
+    file = "//dart/tests/cc_fixture:empty_shared",
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "info_dep",
+    code_assets = [":dep_asset"],
 )
 
 dart_library(
     name = "dep",
-    package_name = "info_dep",
     srcs = ["lib/dep.dart"],
-    code_assets = [":dep_asset"],
+    package = ":pubspec-metadata",
     resources = ["lib/dep.yaml"],
 )
 
@@ -115,16 +120,16 @@ dart_code_asset(
     # A different library from `dep_asset`'s: the two records would dedupe to a
     # single file otherwise, and the flat-depset assertion could not tell a
     # forwarded asset from a dropped one.
-    shared_library = "//dart/tests/cc_fixture:empty_shared_alt",
+    file = "//dart/tests/cc_fixture:empty_shared_alt",
 )
 
 wrapper_executable(
     name = "exec",
     package_name = "exec_pkg",
-    srcs = ["entry.dart"],
+    srcs = ["lib/owned.dart"],
     code_assets = [":exec_asset"],
+    entry_srcs = ["entry.dart"],
     language_version = "3.11",
-    package_srcs = ["lib/owned.dart"],
     resources = ["lib/owned.yaml"],
     # Two packages rooted at one directory, which no package_config may hold:
     # a provider-shape fixture, not a project the analyzer can resolve.
@@ -138,12 +143,13 @@ analyzable_with_package_test(
     target_under_test = ":exec",
 )
 
-# No package name means the caller wanted the other constructor. `dart_info()`
-# would build a nameless package record instead of saying so.
+# No package name means the caller wanted the other constructor.
+# `DartPackageInfo(...)` would build a nameless package record instead of saying
+# so.
 wrapper_executable(
     name = "unnamed_exec",
     package_name = "",
-    srcs = ["entry.dart"],
+    entry_srcs = ["entry.dart"],
     tags = ["manual"],
 )
 
@@ -168,29 +174,35 @@ misowned_asset_test(
     target_under_test = ":misowned_wrapper",
 )
 
-# An executable reaching a library of sources and one of a generated directory:
-# its import check stages the directory and not the sources.
-gen_dart_dir(name = "gen_dir")
-
-dir_library(
-    name = "dir_lib",
-    package_name = "info_gen",
-    dir = ":gen_dir",
+# An executable contributing no package: the entrypoint outside every `lib/`
+# and a dependency's closure, nothing of its own in `DartInfo`.
+bare_executable(
+    name = "bare_exec",
+    entry_srcs = ["entry.dart"],
+    # `entry.dart` imports the package `:exec` states, which this target does
+    # not: a provider-shape fixture, not a project the analyzer can resolve.
+    tags = ["no-dart-analyze"],
+    deps = [":dep"],
 )
 
-dart_binary(
-    name = "checked_bin",
-    main = "checked_main.dart",
-    # Analyzed by the test only: both libraries share this directory's root.
-    tags = ["manual"],
-    deps = [
-        ":dep",
-        ":dir_lib",
-    ],
-)
-
-import_check_inputs_test(
-    name = "import_check_inputs_test",
+analyzable_no_package_test(
+    name = "analyzable_no_package_test",
     size = "small",
-    target_under_test = ":checked_bin",
+    target_under_test = ":bare_exec",
+)
+
+# A package's own `lib/` file handed over as an entrypoint is the swap the docs
+# used to warn failed silently; the constructor refuses it.
+wrapper_executable(
+    name = "misplaced_entry",
+    package_name = "exec_pkg",
+    entry_srcs = ["lib/owned.dart"],
+    language_version = "3.11",
+    tags = ["manual"],
+)
+
+entry_srcs_under_lib_test(
+    name = "entry_srcs_under_lib_test",
+    size = "small",
+    target_under_test = ":misplaced_entry",
 )

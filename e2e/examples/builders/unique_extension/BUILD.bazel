@@ -1,0 +1,44 @@
+# Non-SharedPart builder emitting a unique output extension; no combining.
+
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_codegen",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "unique_extension",
+)
+
+dart_codegen(
+    name = "_event_freezed_gen",
+    src = "lib/event.dart",
+    generator = "@rules_dart//dart/ext/freezed:shim",
+    output_suffixes = [".freezed.dart"],
+    package = ":pubspec-metadata",
+    deps = ["@pub_deps//:freezed_annotation"],
+)
+
+dart_library(
+    name = "unique_extension",
+    srcs = [
+        "lib/event.dart",
+        ":_event_freezed_gen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:freezed_annotation"],
+)
+
+dart_test(
+    name = "event_test",
+    size = "small",
+    main = "test/event_test.dart",
+    deps = [
+        ":unique_extension",
+        "@pub_deps//:test",
+    ],
+)

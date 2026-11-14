@@ -1,0 +1,25 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata", "dart_test")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "ownpkg",
+)
+
+# Regression check: a package whose metadata comes from a srcs-less façade
+# library while the files arrive via the consuming rule's own `srcs` must
+# still appear in the generated package_config (root resolution scans the
+# rule's own inputs, not just dep sources). The aspect lints `lib/own_util.dart`
+# through the test's own `srcs`.
+dart_library(
+    name = "ownpkg_facade",
+    srcs = [],
+    package = ":pubspec-metadata",
+)
+
+dart_test(
+    name = "own_srcs_resolution_test",
+    size = "small",
+    srcs = ["lib/own_util.dart"],
+    main = "test/own_test.dart",
+    deps = [":ownpkg_facade"],
+)

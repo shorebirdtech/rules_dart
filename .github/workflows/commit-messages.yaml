@@ -1,6 +1,5 @@
-# Checks every commit pushed to main against the commit policy in AGENTS.md:
-# a conventional-commit subject and the `Changelog:` trailer rules. We push
-# straight to main, so there is no PR to check instead.
+# Checks every commit pushed to main against the commit policy in AGENTS.md.
+# We push straight to main, so there is no PR to check instead.
 name: Commit messages
 on:
   push:
@@ -9,14 +8,7 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
-        with:
-          bazelisk-cache: true
-          repository-cache: true
-      - name: Check commit messages
-        run: bazel run //tools/changelog:check -- --range "${{ github.event.before }}..${{ github.sha }}"
+    uses: ./.github/workflows/overhead-commit-messages.yaml
+    with:
+      # Bump to start the Bazel caches afresh (see CACHE_VERSION in ci.yaml).
+      cache-version: "1"

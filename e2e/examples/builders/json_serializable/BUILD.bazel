@@ -1,0 +1,137 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_codegen",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+load(
+    "@rules_dart//dart/ext/json_serializable:defs.bzl",
+    "json_serializable_codegen",
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "json_serializable_fixture",
+    language_version = "3.11",
+)
+
+# Comprehensive e2e for json_serializable. Demonstrates:
+#
+#   - Hand-wired primitives form (primitive_user.dart via dart_codegen +
+#     combining), showing the plumbing the macro hides.
+#   - Cross-file Resolver walking (cross_user.dart implements a type from
+#     base.dart, a plain source of the package its generator sees through
+#     `asset_deps`).
+#   - Full annotation surface via the `json_serializable_codegen` macro
+#     (:advanced_codegen) — FieldRename.snake, @JsonKey(name:/toJson:/
+#     fromJson:), @JsonConverter, @JsonEnum, genericArgumentFactories.
+#   - Two packages that import each other (`cycle/`), each with a model whose
+#     generated code needs a type of the other.
+#
+# The package is one `dart_library`, holding every source and what the
+# generators write.
+
+# --- Primitives-form demonstration. ---
+dart_codegen(
+    name = "_primitive_user_json_part",
+    src = "lib/primitive_user.dart",
+    generator = "@rules_dart//dart/ext/json_serializable:shim",
+    output_suffixes = [".json_serializable.g.part"],
+    package = ":pubspec-metadata",
+    deps = ["@pub_deps//:json_annotation"],
+)
+
+dart_codegen(
+    name = "_primitive_user_combined",
+    src = "lib/primitive_user.dart",
+    generator = "@rules_dart//dart/ext/combining_shim:bin",
+    output_suffixes = [".g.dart"],
+    package = ":pubspec-metadata",
+    parts = [":_primitive_user_json_part"],
+)
+
+# --- Cross-file Resolver (base.dart is a plain source of the package). ---
+json_serializable_codegen(
+    name = "cross_user_codegen",
+    srcs = ["lib/cross_user.dart"],
+    asset_deps = ["lib/base.dart"],
+    package = ":pubspec-metadata",
+)
+
+# --- Advanced annotations via the macro. ---
+# user.dart references role.dart and custom_id.dart; each file's generator
+# sees its siblings through the macro.
+json_serializable_codegen(
+    name = "advanced_codegen",
+    srcs = [
+        "lib/custom_id.dart",
+        "lib/role.dart",
+        "lib/user.dart",
+        "lib/wrapper.dart",
+    ],
+    package = ":pubspec-metadata",
+    deps = ["@pub_deps//:meta"],
+)
+
+dart_library(
+    name = "json_serializable_fixture",
+    srcs = [
+        "lib/base.dart",
+        "lib/cross_user.dart",
+        "lib/custom_id.dart",
+        "lib/primitive_user.dart",
+        "lib/role.dart",
+        "lib/user.dart",
+        "lib/wrapper.dart",
+        ":_primitive_user_combined",
+        ":advanced_codegen",
+        ":cross_user_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@pub_deps//:json_annotation",
+        "@pub_deps//:meta",
+    ],
+)
+
+dart_test(
+    name = "primitive_user_test",
+    size = "small",
+    main = "test/primitive_user_test.dart",
+    deps = [
+        ":json_serializable_fixture",
+        "@pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "cross_file_test",
+    size = "small",
+    main = "test/cross_file_test.dart",
+    deps = [
+        ":json_serializable_fixture",
+        "@pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "user_test",
+    size = "small",
+    main = "test/user_test.dart",
+    deps = [
+        ":json_serializable_fixture",
+        "@pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "wrapper_test",
+    size = "small",
+    main = "test/wrapper_test.dart",
+    deps = [
+        ":json_serializable_fixture",
+        "@pub_deps//:test",
+    ],
+)

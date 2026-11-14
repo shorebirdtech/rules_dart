@@ -1,0 +1,41 @@
+load("@rules_dart//dart:defs.bzl", "dart_binary")
+load("@rules_dart//dart/ext:defs.bzl", "builder_shim_library")
+
+# Trivial in-tree generators shared by the fixtures. The choice of generator is
+# incidental to what's under test (generated-input co-location), so these are
+# hand-written Builders, not real codegen packages. Each is a `dart_binary` over
+# rules_dart's shim runner, built against this workspace's own pub resolution.
+
+builder_shim_library(
+    name = "builder_shim",
+    pub_hub = "@pub_deps",
+)
+
+[dart_binary(
+    name = name,
+    srcs = [name + ".dart"],
+    code_assets_from_packages = False,
+    main = name + ".dart",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":builder_shim",
+        "@pub_deps//:build",
+    ],
+) for name in [
+    "part_gen",
+    "lib_gen",
+    "shard_gen",
+]]
+
+dart_binary(
+    name = "aggregate_gen",
+    srcs = ["aggregate_gen.dart"],
+    code_assets_from_packages = False,
+    main = "aggregate_gen.dart",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":builder_shim",
+        "@pub_deps//:build",
+        "@pub_deps//:glob",
+    ],
+)

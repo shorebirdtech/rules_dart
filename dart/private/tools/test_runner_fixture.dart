@@ -9,6 +9,10 @@ import 'dart:io';
 /// - `leak <release>`: starts a copy of itself in `linger` mode that shares
 ///   this process's stdio, then exits without waiting for it.
 /// - `linger <release>`: holds that stdio open until `<release>` exists.
+/// - `env`: prints the names of its environment variables, one a line.
+/// - `files`: prints the path of each file below its working directory, one a
+///   line.
+/// - nothing: passes, so that it runs as a test of its own.
 Future<void> main(List<String> args) async {
   switch (args) {
     case ['stream']:
@@ -30,8 +34,22 @@ Future<void> main(List<String> args) async {
       while (!File(release).existsSync()) {
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
+    case ['env']:
+      Platform.environment.keys.forEach(stdout.writeln);
+    case ['files']:
+      final here = Directory.current.path;
+      for (final file in Directory.current.listSync(recursive: true)) {
+        if (file is! File) continue;
+        stdout.writeln(
+          file.path.substring(here.length + 1).replaceAll(r'\', '/'),
+        );
+      }
+    case []:
+      break;
     default:
-      stderr.writeln('usage: stream | leak <release> | linger <release>');
+      stderr.writeln(
+        'usage: stream | leak <release> | linger <release> | env | files',
+      );
       exit(2);
   }
 }

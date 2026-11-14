@@ -9,7 +9,7 @@ load(
 
 # The `dart_analyze` aspect's green paths, under the root `//:analysis_config`,
 # which lists this fixture's three options files. Their red halves are in
-# `e2e/analysis_failure`, where CI expects each build to fail.
+# `e2e/examples/fixtures/analysis_failure`, where CI expects each build to fail.
 
 dart_analysis_options(
     name = "options",
@@ -66,7 +66,7 @@ aspect_applies_test(
 )
 
 # A `flutter_library`'s files arrive through `DefaultInfo`, not
-# `DartAnalyzableInfo.srcs`, which is empty.
+# `DartAnalyzableInfo.entry_srcs`, which is empty.
 aspect_applies_test(
     name = "flutter_shaped_applies_test",
     size = "small",

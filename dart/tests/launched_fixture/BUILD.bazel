@@ -1,0 +1,57 @@
+load("//dart:defs.bzl", "dart_binary", "dart_test")
+load("//dart/tests:compile_package_search_test.bzl", "compile_package_search_test")
+
+# The same program in every way rules_dart can package it. `launched_test`
+# starts each as an executable, the way `bazel run` or a `data` consumer would.
+[
+    dart_binary(
+        name = "bin_" + mode.replace("-", "_"),
+        compile_mode = mode,
+        main = "child.dart",
+    )
+    for mode in [
+        "exe",
+        "kernel",
+        "aot-snapshot",
+    ]
+]
+
+# A `dart_test` is itself a launcher; started from another test it must run its
+# own dill, not the one in the parent's environment.
+dart_test(
+    name = "child_test",
+    main = "child.dart",
+)
+
+dart_test(
+    name = "launched_test",
+    size = "small",
+    args = [
+        "dart_test=$(rlocationpath :child_test)",
+        "exe=$(rlocationpath :bin_exe)",
+        "kernel=$(rlocationpath :bin_kernel)",
+        "aot-snapshot=$(rlocationpath :bin_aot_snapshot)",
+    ],
+    data = [
+        ":bin_aot_snapshot",
+        ":bin_exe",
+        ":bin_kernel",
+        ":child_test",
+    ],
+    main = "launched_test.dart",
+    deps = ["//dart/runfiles"],
+)
+
+# `dart compile` finds the empty package config staged above its input, for a
+# binary's kernel and for a script compiled from source.
+[
+    compile_package_search_test(
+        name = "compile_package_search_%s_test" % name,
+        size = "small",
+        target_under_test = target,
+    )
+    for name, target in [
+        ("kernel", ":bin_exe"),
+        ("script", "//dart/pub"),
+    ]
+]

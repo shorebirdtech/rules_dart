@@ -1,0 +1,89 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_dart//dart:defs.bzl", "dart_codegen", "dart_library", "dart_package_metadata")
+load("//fix/tools:changes.bzl", "dart_changes")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "fix_dirty",
+)
+
+# The red end of the red/green pair, and the fixture the whole workspace exists
+# for. Both generated parts carry the same `prefer_final_locals` violation as
+# the hand-written library:
+#
+#   * `dart fix` skips `model.g.dart` on its own, by name.
+#   * `model.freezed.dart` it would happily rewrite. Only the rule stops it —
+#     first by excluding it from the analysis, then by refusing to write back
+#     anything that was not `is_source`.
+#
+# The hand-written violation is load-bearing, so this library opts out of the
+# `dart_analyze` aspect's check; `@rules_dart//dart/fix` still fixes it.
+# //fix/clean is the analyzed half.
+dart_codegen(
+    name = "model_g",
+    src = "lib/model.dart",
+    config = json.encode({"violation": True}),
+    generator = "//fix/tools:part_gen",
+    output_suffixes = [".g.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_codegen(
+    name = "model_freezed",
+    src = "lib/model.dart",
+    config = json.encode({"violation": True}),
+    generator = "//fix/tools:part_gen",
+    output_suffixes = [".freezed.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "lib",
+    srcs = [
+        "lib/model.dart",
+        ":model_freezed",
+        ":model_g",
+    ],
+    package = ":pubspec-metadata",
+    tags = ["no-dart-analyze"],
+)
+
+dart_changes(
+    name = "fixes",
+    output_group = "dart_fix_changes",
+    target = ":lib",
+)
+
+# The `--content` list is the whole assertion and it is exhaustive: an extra
+# file fails the build, and so does a dropped one. That is what says a
+# generated file was never proposed: one appearing would mean the eligibility
+# check let it through; one dropped, that `dart fix` was still allowed at it.
+run_binary(
+    name = "model_fixed",
+    srcs = [":fixes"],
+    outs = ["model_fixed.dart"],
+    args = [
+        "--changes",
+        "$(execpath :fixes)",
+        "--out",
+        "$(execpath model_fixed.dart)",
+        "--content",
+        "fix/dirty/lib/model.dart",
+        "--path",
+        "fix/dirty/lib/model.dart",
+    ],
+    tool = "//fix/tools:check_changes",
+)
+
+# The golden is //fix/clean's source rather than a checked-in copy, so this asserts
+# the two things that matter at once: the fix output is byte-correct, and what
+# it is byte-correct against is a library the `dart_analyze` aspect passes.
+# The `@override` in it is also the proof that the excluded parts still
+# resolved — the analyzer cannot propose it without the supertype.
+diff_test(
+    name = "model_fixed_test",
+    size = "small",
+    file1 = ":model_fixed.dart",
+    file2 = "//fix/clean:lib/model.dart",
+)

@@ -1,0 +1,27 @@
+load("//dart:defs.bzl", "dart_library", "dart_linked_code_asset", "dart_package_metadata")
+
+# A package that links native code into each program. The tool is any
+# executable: nothing here runs it. It is not one of the rules' own tools, as
+# a real package's is not: Bazel accepts a tool from the rule's own attributes
+# where it refuses one from a dependency without a declared toolchain.
+dart_linked_code_asset(
+    name = "native",
+    asset_id = "package:link_hook_native/native",
+    library = "//dart/tests/cc_fixture:empty",
+    symbols = "@bazel_tools//tools/zip:zipper",
+    tags = ["manual"],
+)
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "link_hook_native",
+    linked_code_assets = [":native"],
+)
+
+dart_library(
+    name = "native_lib",
+    srcs = ["lib/native.dart"],
+    package = ":pubspec-metadata",
+    tags = ["manual"],
+    visibility = ["//dart/tests/link_hook_fixture:__pkg__"],
+)

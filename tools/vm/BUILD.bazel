@@ -1,0 +1,26 @@
+load("//dart:defs.bzl", "dart_binary", "dart_test")
+
+# Runs the e2e suites on a test VM as CI runs them. The VMs come from
+# overhead: `bazel run @overhead//vm:create_linux_vm -- <vm-name>`, and
+# `create_windows_vm`. See run_e2e.dart.
+dart_binary(
+    name = "run_e2e",
+    srcs = ["e2e_items.dart"],
+    main = "run_e2e.dart",
+    deps = [
+        "@overhead//ci",
+        "@overhead//vm",
+    ],
+)
+
+dart_test(
+    name = "e2e_items_test",
+    size = "small",
+    srcs = ["e2e_items.dart"],
+    main = "e2e_items_test.dart",
+    deps = [
+        "@ext_pub_deps//:test",
+        "@overhead//ci",
+        "@overhead//vm",
+    ],
+)

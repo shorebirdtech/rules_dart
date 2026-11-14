@@ -18,19 +18,21 @@ cc_shared_library(
         "@platforms//os:windows": ["windows_export_all_symbols"],
         "//conditions:default": [],
     }),
+    # Also a prebuilt library's stand-in.
+    visibility = ["//dart/tests/prebuilt_library_fixture:__pkg__"],
     deps = [":counter"],
 )
 
 dart_code_asset(
     name = "a",
     asset_id = "package:a/a.dart",
-    shared_library = ":counter_shared",
+    file = ":counter_shared",
 )
 
 dart_code_asset(
     name = "b",
     asset_id = "package:b/b.dart",
-    shared_library = ":counter_shared",
+    file = ":counter_shared",
 )
 
 dart_test(
@@ -41,6 +43,8 @@ dart_test(
         ":b",
     ],
     main = "shared_library_asset_test.dart",
+    # `test_runner_test` runs it through its launcher as `bazel run` would.
+    visibility = ["//dart/private/tools:__pkg__"],
 )
 
 dart_binary(

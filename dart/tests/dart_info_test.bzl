@@ -24,27 +24,33 @@ invalid `deps` entry.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
-load("//dart:providers.bzl", "DartAnalyzableInfo", "DartCodeAssetInfo", "DartInfo")
+load("//dart:providers.bzl", "DartAnalyzableInfo", "DartCodeAssetInfo", "DartInfo", "DartPackageInfo")
 load("//dart/private:common.bzl", "package_code_assets")
 load(
     "//dart/private:dart_info.bzl",
-    "dart_analyzable_info_with_package",
-    "dart_info",
+    "dart_analyzable_info",
+    "dart_analyzable_info_no_package",
     "dart_info_no_package",
 )
+load("//dart/private:dart_summary.bzl", "SUMMARY_ATTRS", "dart_info")
+load("//dart/private:exec_groups.bzl", "PORTABLE_EXEC_GROUPS")
+load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS")
 
 def _wrapper_library_impl(ctx):
     return [
         DefaultInfo(files = depset(ctx.files.srcs + ctx.files.resources)),
         dart_info(
-            label = ctx.label,
-            package_name = ctx.attr.package_name,
-            lib_root = ctx.label.package,
+            ctx = ctx,
+            packages = [DartPackageInfo(
+                label = ctx.label,
+                package_name = ctx.attr.package_name,
+                package_root = ctx.label.package,
+                code_assets = ctx.attr.code_assets,
+                language_version = ctx.attr.language_version,
+            )],
             deps = ctx.attr.deps,
             srcs = ctx.files.srcs,
             resources = ctx.files.resources,
-            code_assets = ctx.attr.code_assets,
-            language_version = ctx.attr.language_version,
         ),
     ]
 
@@ -57,7 +63,9 @@ wrapper_library = rule(
         "code_assets": attr.label_list(providers = [DartCodeAssetInfo]),
         "package_name": attr.string(mandatory = True),
         "language_version": attr.string(),
-    },
+    } | SUMMARY_ATTRS,
+    exec_groups = PORTABLE_EXEC_GROUPS,
+    toolchains = COPY_TO_DIRECTORY_TOOLCHAINS,
     doc = "A non-`dart_library` producer of `DartInfo`, built through `dart_info()`.",
 )
 
@@ -78,17 +86,20 @@ facade_library = rule(
 
 def _wrapper_executable_impl(ctx):
     return [
-        DefaultInfo(files = depset(ctx.files.srcs + ctx.files.package_srcs)),
-        dart_analyzable_info_with_package(
+        DefaultInfo(files = depset(ctx.files.srcs + ctx.files.entry_srcs)),
+        dart_analyzable_info(
             label = ctx.label,
-            package_name = ctx.attr.package_name,
-            lib_root = ctx.label.package,
+            packages = [DartPackageInfo(
+                label = ctx.label,
+                package_name = ctx.attr.package_name,
+                package_root = ctx.label.package,
+                code_assets = ctx.attr.code_assets,
+                language_version = ctx.attr.language_version,
+            )],
             deps = ctx.attr.deps,
             srcs = ctx.files.srcs,
-            package_srcs = ctx.files.package_srcs,
             resources = ctx.files.resources,
-            code_assets = ctx.attr.code_assets,
-            language_version = ctx.attr.language_version,
+            entry_srcs = ctx.files.entry_srcs,
         ),
     ]
 
@@ -96,7 +107,7 @@ wrapper_executable = rule(
     implementation = _wrapper_executable_impl,
     attrs = {
         "srcs": attr.label_list(allow_files = [".dart"]),
-        "package_srcs": attr.label_list(allow_files = [".dart"]),
+        "entry_srcs": attr.label_list(allow_files = [".dart"]),
         "resources": attr.label_list(allow_files = True),
         "deps": attr.label_list(providers = [DartInfo]),
         "code_assets": attr.label_list(providers = [DartCodeAssetInfo]),
@@ -104,7 +115,26 @@ wrapper_executable = rule(
         "language_version": attr.string(),
     },
     doc = "An executable that also contributes a package, built through " +
-          "`dart_analyzable_info_with_package()`.",
+          "`dart_analyzable_info()`.",
+)
+
+def _bare_executable_impl(ctx):
+    return [
+        DefaultInfo(files = depset(ctx.files.entry_srcs)),
+        dart_analyzable_info_no_package(
+            deps = ctx.attr.deps,
+            entry_srcs = ctx.files.entry_srcs,
+        ),
+    ]
+
+bare_executable = rule(
+    implementation = _bare_executable_impl,
+    attrs = {
+        "entry_srcs": attr.label_list(allow_files = [".dart"]),
+        "deps": attr.label_list(providers = [DartInfo]),
+    },
+    doc = "An executable contributing no package, built through " +
+          "`dart_analyzable_info_no_package()`.",
 )
 
 def _short_paths(dep):
@@ -166,11 +196,8 @@ def _no_package_test_impl(ctx):
     names = sorted([p.package_name for p in info.transitive_packages.to_list()])
     asserts.equals(env, ["info_dep"], names)
 
-    # Empty rather than a name with no record behind it. No consumer reads
-    # these off `DartInfo` — package identity comes from `transitive_packages` —
-    # so an invented name would be unverifiable fiction.
-    asserts.equals(env, "", info.package_name)
-    asserts.equals(env, "", info.lib_root)
+    # No package of its own, rather than a name with no record behind it.
+    asserts.equals(env, (), info.packages)
 
     # The forwarding half: identical to `dart_info()`'s. A facade that dropped
     # a dependency's closure would break the consumer that lists only it.
@@ -246,8 +273,8 @@ def _analyzable_with_package_test_impl(ctx):
         return analysistest.end(env)
     asserts.true(
         env,
-        own[0].lib_root.endswith("dart_info_fixture"),
-        "the package record's lib_root is wrong: %s" % own[0].lib_root,
+        own[0].package_root.endswith("dart_info_fixture"),
+        "the package record's package_root is wrong: %s" % own[0].package_root,
     )
     asserts.equals(env, "3.11", own[0].language_version)
 
@@ -297,12 +324,18 @@ def _analyzable_with_package_test_impl(ctx):
     # The entrypoint is in the outer field and *only* there: it belongs to no
     # package's `lib/`, so a `DartInfo` carrying it would be claiming a
     # `package:` URI reaches it.
-    entry = sorted([f.short_path for f in analyzable.srcs.to_list()])
+    entry = sorted([f.short_path for f in analyzable.entry_srcs.to_list()])
     asserts.equals(env, 1, len(entry), "expected exactly one entrypoint: %s" % entry)
     asserts.true(
         env,
         entry[0].endswith("/entry.dart"),
-        "the entrypoint is missing from DartAnalyzableInfo.srcs: %s" % entry,
+        "the entrypoint is missing from DartAnalyzableInfo.entry_srcs: %s" % entry,
+    )
+    asserts.equals(
+        env,
+        ["dart/tests/dart_info_fixture/lib/owned.dart"],
+        sorted([f.short_path for f in info.srcs]),
+        "the package's own sources are `DartInfo.srcs`, the field readers use",
     )
     asserts.true(
         env,
@@ -314,6 +347,64 @@ def _analyzable_with_package_test_impl(ctx):
 
 analyzable_with_package_test = analysistest.make(_analyzable_with_package_test_impl)
 
+def _analyzable_no_package_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    target = analysistest.target_under_test(env)
+
+    # The same separation as with a package: analyzable, never a legal dep.
+    asserts.true(env, DartAnalyzableInfo in target, "must provide DartAnalyzableInfo")
+    asserts.false(env, DartInfo in target, "must NOT provide DartInfo")
+    if DartAnalyzableInfo not in target:
+        return analysistest.end(env)
+
+    analyzable = target[DartAnalyzableInfo]
+    info = analyzable.dart_info
+
+    # The entrypoint rides `entry_srcs` alone; the nested closure is the
+    # dependency's, with no package record of the executable's own.
+    asserts.equals(
+        env,
+        ["dart/tests/dart_info_fixture/entry.dart"],
+        sorted([f.short_path for f in analyzable.entry_srcs.to_list()]),
+    )
+    asserts.equals(env, 0, len(info.packages))
+    asserts.equals(env, 0, len(info.srcs))
+    asserts.equals(
+        env,
+        ["info_dep"],
+        sorted([p.package_name for p in info.transitive_packages.to_list()]),
+    )
+    srcs = _short_paths(info.transitive_srcs)
+    asserts.true(
+        env,
+        [p for p in srcs if p.endswith("/lib/dep.dart")] != [],
+        "dependency's source missing from transitive_srcs: %s" % srcs,
+    )
+    asserts.true(
+        env,
+        [p for p in srcs if p.endswith("/entry.dart")] == [],
+        "the entrypoint leaked into transitive_srcs: %s" % srcs,
+    )
+
+    return analysistest.end(env)
+
+analyzable_no_package_test = analysistest.make(_analyzable_no_package_test_impl)
+
+def _entry_srcs_under_lib_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(
+        env,
+        "`entry_srcs` file `dart/tests/dart_info_fixture/lib/owned.dart` is under the `lib/` of package `exec_pkg`",
+    )
+    return analysistest.end(env)
+
+# The silent swap, now refused: a package's own `lib/` file passed as an
+# entrypoint would analyze fine yet be invisible to every `DartInfo` reader.
+entry_srcs_under_lib_test = analysistest.make(
+    _entry_srcs_under_lib_test_impl,
+    expect_failure = True,
+)
+
 def _no_package_name_test_impl(ctx):
     env = analysistest.begin(ctx)
     asserts.expect_failure(env, "`package_name` is empty")
@@ -321,8 +412,8 @@ def _no_package_name_test_impl(ctx):
 
 # The redirect that keeps the two constructors from collapsing into one. An
 # empty `package_name` means the caller wanted `dart_analyzable_info()`, and
-# saying so is cheaper than the package record with no name that `dart_info()`
-# would otherwise build.
+# saying so is cheaper than the package record with no name that
+# `DartPackageInfo(...)` would otherwise build.
 no_package_name_test = analysistest.make(
     _no_package_name_test_impl,
     expect_failure = True,
@@ -363,7 +454,7 @@ def _language_version_passthrough_test_impl(ctx):
 
     return analysistest.end(env)
 
-# `language_version` is a required parameter of `dart_info()`, which is a claim
+# `language_version` is a required parameter of `DartPackageInfo(...)`, which is a claim
 # about the *calling convention* and not about the value: a package that states
 # no language version is still expressible, by answering `""`. These two cases
 # are what says so — the stated value reaches the record, and the empty one
@@ -377,57 +468,3 @@ language_version_passthrough_test = analysistest.make(
         "expected_package": attr.string(mandatory = True),
     },
 )
-
-def _gen_dart_dir_impl(ctx):
-    out = ctx.actions.declare_directory(ctx.label.name)
-    ctx.actions.run_shell(outputs = [out], command = "echo '// generated' > %s/gen.dart" % out.path)
-    return [DefaultInfo(files = depset([out]))]
-
-gen_dart_dir = rule(
-    implementation = _gen_dart_dir_impl,
-    doc = "A tree artifact holding one Dart file, as a generator would make.",
-)
-
-def _dir_library_impl(ctx):
-    return [
-        DefaultInfo(files = depset(ctx.files.dir)),
-        dart_info(
-            label = ctx.label,
-            package_name = ctx.attr.package_name,
-            lib_root = ctx.label.package,
-            deps = [],
-            srcs = ctx.files.dir,
-            language_version = "",
-        ),
-    ]
-
-dir_library = rule(
-    implementation = _dir_library_impl,
-    attrs = {
-        "dir": attr.label(mandatory = True),
-        "package_name": attr.string(mandatory = True),
-    },
-    doc = "A library whose source is a generated directory.",
-)
-
-def _import_check_inputs_test_impl(ctx):
-    # The import check reads only the names of its dependencies' files, so
-    # they reach it as arguments, not inputs; a dependency's generated
-    # directory is still staged, since its files are known only by listing it.
-    env = analysistest.begin(ctx)
-    checks = [a for a in analysistest.target_actions(env) if a.mnemonic == "DartImportCheck"]
-    asserts.equals(env, 1, len(checks), "the executable's own import check")
-    inputs = [f.short_path for f in checks[0].inputs.to_list()]
-    asserts.true(
-        env,
-        [p for p in inputs if p.endswith("/lib/dep.dart")] == [],
-        "a dependency's source is an input of the import check: %s" % inputs,
-    )
-    asserts.true(
-        env,
-        [p for p in inputs if p.endswith("/gen_dir")] != [],
-        "a dependency's generated directory is not an input of the import check: %s" % inputs,
-    )
-    return analysistest.end(env)
-
-import_check_inputs_test = analysistest.make(_import_check_inputs_test_impl)

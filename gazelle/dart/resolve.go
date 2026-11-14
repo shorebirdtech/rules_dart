@@ -14,54 +14,65 @@ import (
 )
 
 // indexedKinds is the set of rule kinds that provide a Dart package for
-// import resolution: the dart_library primitive plus every convenience
-// macro (each wraps a dart_library under the hood).
-var indexedKinds = func() map[string]bool {
-	m := map[string]bool{"dart_library": true}
-	for _, k := range macroKinds {
-		m[k] = true
-	}
-	return m
-}()
+// import resolution. A codegen macro is not one: the library holding its
+// sources lists what it generates.
+var indexedKinds = map[string]bool{"dart_library": true, "dart_package_cycle": true}
 
 // Imports returns the import specifications for a rule.
 // These are used to build the import index for dependency resolution.
 func (d *dartLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	// A dart_library (or macro wrapping one) provides its rule name as an
-	// import, plus its `package_name` attr when that differs — imports use
-	// the Dart package name (`package:<package_name>/...`), which need not
-	// match the Bazel target name.
+	return d.importSpecs(c, r, f.Pkg)
+}
+
+// importSpecs is what a rule in Bazel package rel provides: the `package:`
+// URI of each of its sources, and the package itself, by its rule name and
+// its package's name.
+func (d *dartLang) importSpecs(c *config.Config, r *rule.Rule, rel string) []resolve.ImportSpec {
 	if !indexedKinds[r.Kind()] {
 		return nil
 	}
-	p := placeLibrary(c, f.Pkg, repoDir(c, f.Pkg))
-	pkgName := r.AttrString("package_name")
-	var specs []resolve.ImportSpec
-	if p.Decl == nil {
-		specs = append(specs, resolve.ImportSpec{Lang: dartName, Imp: r.Name()})
-		if pkgName != "" && pkgName != r.Name() {
-			specs = append(specs, resolve.ImportSpec{Lang: dartName, Imp: pkgName})
+	if r.Kind() == "dart_package_cycle" {
+		// What its members, written below it, provide (cycle.go).
+		if decl := declAt(c, rel, r.Name()); decl != nil {
+			return append([]resolve.ImportSpec{{Lang: dartName, Imp: r.Name()}}, d.cycles.cycleSpecs(decl)...)
 		}
-	} else if f.Pkg == libDirOf(p.Root) && r.Name() == p.PackageName {
-		// One directory of a package declared above is named for its
-		// directory, which is no package name (`lib/src/path` is not
-		// package:path). Only the package's lib/ library stands for it.
-		specs = append(specs, resolve.ImportSpec{Lang: dartName, Imp: p.PackageName})
+		return nil
 	}
-	// Each source is also indexed by its `package:` URI, so an import of one
-	// file resolves to the target holding it, wherever in the package that is.
-	if pkgName != "" {
-		p.PackageName = pkgName
+	place := placeOf(c, rel)
+	pkgName := libraryPackageName(c, r, place)
+	specs := []resolve.ImportSpec{{Lang: dartName, Imp: r.Name()}}
+	if pkgName != r.Name() {
+		specs = append(specs, resolve.ImportSpec{Lang: dartName, Imp: pkgName})
+	}
+	if place.Err != nil {
+		return specs
 	}
 	for _, src := range r.AttrStrings("srcs") {
-		if strings.HasPrefix(src, ":") || strings.HasPrefix(src, "/") || strings.HasPrefix(src, "@") {
+		if src == "" || strings.ContainsAny(src[:1], "@:/") {
 			continue
 		}
-		if uri := packageURI(p, path.Join(f.Pkg, src)); uri != "" {
+		if uri := packageURI(pkgName, place.Root, path.Join(rel, src)); uri != "" {
 			specs = append(specs, resolve.ImportSpec{Lang: dartName, Imp: uri})
 		}
 	}
 	return specs
+}
+
+// libraryPackageName is the Dart package of r, a library at place: the one
+// its `package` declares, which Gazelle writes from the facts stated for its
+// root, or else the name of its root's directory, or, at the repository's
+// root, its own name, as `dart_library` names it.
+func libraryPackageName(c *config.Config, r *rule.Rule, place packagePlace) string {
+	if place.Err == nil && r.AttrString("package") != "" {
+		if name := statedPackageName(c, place.Root); name != "" {
+			return name
+		}
+		return libraryName(place.Root, c)
+	}
+	if place.Err == nil && place.Root != "" {
+		return path.Base(place.Root)
+	}
+	return r.Name()
 }
 
 // Embeds returns rules that this rule embeds (not used for Dart).
@@ -75,6 +86,12 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 	if !ok || is == nil {
 		return
 	}
+	if is.cycle != nil {
+		// A generator in a cycle reads every member's sources, not the
+		// cycle's library, which holds what it generates; and what the
+		// members import from outside the cycle (cycle.go).
+		is = d.cycleCodegenImports(is, from)
+	}
 
 	pubDepsRepo := ""
 	if c.Exts != nil {
@@ -83,38 +100,41 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 		}
 	}
 
+	// A rule doesn't depend on a package it provides itself; it depends only
+	// on the other rules holding the files it imports from it. Only a
+	// library provides one: a binary or test named like a package (the
+	// `bin/<package>.dart` that `dart create` writes) still depends on it.
+	provided := map[string]bool{}
+	for _, spec := range d.importSpecs(c, r, from.Pkg) {
+		provided[spec.Imp] = true
+	}
+
 	var deps []string
 	for _, pkg := range is.SortedPackages() {
-		// A library named for its package doesn't depend on that package.
-		// A binary or test of that name is no such library: it does.
-		if !is.split && pkg == r.Name() && indexedKinds[r.Kind()] {
+		uris := is.SortedURIs(pkg)
+		if provided[pkg] {
+			resolveFiles(c, ix, uris, from, &deps)
 			continue
 		}
 
-		// A gazelle:resolve override for the package wins.
+		// Check for gazelle:resolve override first
 		spec := resolve.ImportSpec{Lang: dartName, Imp: pkg}
-		self := pkg == is.self
-		if !(self && is.split) {
-			if override, ok := resolve.FindRuleWithOverride(c, spec, dartName); ok {
-				deps = append(deps, override.Rel(from.Repo, from.Pkg).String())
-				continue
-			}
+		if override, ok := resolve.FindRuleWithOverride(c, spec, dartName); ok {
+			deps = append(deps, override.Rel(from.Repo, from.Pkg).String())
+			continue
 		}
 
-		// A file imported by URI resolves to the target that holds it.
-		// Only when some file is in no indexed target does the package's
-		// name decide, and never for the rule's own package when it is one
-		// directory of it: the package's lib/ library likely exports this
-		// one, so depending on it would be a cycle. An unindexed file of
-		// its own package (generated, excluded) is left to the user.
-		if resolveFiles(c, ix, is.SortedURIs(pkg), from, &deps) || (self && is.split) {
+		// Each imported file resolves to the rule that holds it. The
+		// package's name decides only when some file is in no indexed rule
+		// (a pub package, or sources listed by glob).
+		if len(uris) > 0 && resolveFiles(c, ix, uris, from, &deps) {
 			continue
 		}
 
 		// Try to find in the rule index (first-party deps). Skip exact
 		// self-matches (a rule whose package_name is indexed can match its
 		// own import set) but keep legitimate intra-package cross-target
-		// deps — those are filtered above only for a library named pkg.
+		// deps — those are filtered above only for a package this rule provides.
 		matches := ix.FindRulesByImportWithConfig(c, spec, dartName)
 		matched := false
 		for _, m := range matches {
@@ -129,11 +149,6 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 			continue
 		}
 
-		// The rule's own package is never a pub package.
-		if pkg == is.self {
-			continue
-		}
-
 		// External repository (pub package)
 		var lbl label.Label
 		if pubDepsRepo != "" {
@@ -144,19 +159,46 @@ func (d *dartLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Rem
 		deps = append(deps, lbl.String())
 	}
 
+	deps = append(deps, is.labels...)
+	if is.annotationPackage != "" {
+		// The macro's annotation_dep is its builder's runtime package,
+		// resolved as an import of it would be; the macro's own default
+		// needs no statement.
+		if lbl := pubPackageLabel(c, ix, is.annotationPackage, from, pubDepsRepo); lbl != is.annotationDefault {
+			r.SetAttr("annotation_dep", lbl)
+		} else {
+			r.DelAttr("annotation_dep")
+		}
+	}
 	if len(deps) > 0 {
-		deps = dedupe(deps)
-		r.SetAttr("deps", deps)
+		r.SetAttr("deps", dedupe(deps))
 	}
 }
 
-// resolveFiles adds a dep on the target holding each file URI and reports
-// whether every one was found (a file in the importing rule itself counts).
-// No URIs is not found: the import names a package, not a file.
-func resolveFiles(c *config.Config, ix *resolve.RuleIndex, uris []string, from label.Label, deps *[]string) bool {
-	if len(uris) == 0 {
-		return false
+// resolveFiles adds a dep on the rule holding each file URI, and reports
+// whether every file was found in some rule (the importing rule included).
+// A file held by more than one rule is logged and left out, not guessed;
+// a `# gazelle:resolve dart <uri> <label>` directive picks one.
+// pubPackageLabel is the label an import of package pkg, and no file of it,
+// resolves to from a rule at from: an override, the rule that indexes it, or
+// the package's pub repository.
+func pubPackageLabel(c *config.Config, ix *resolve.RuleIndex, pkg string, from label.Label, pubDepsRepo string) string {
+	spec := resolve.ImportSpec{Lang: dartName, Imp: pkg}
+	if override, ok := resolve.FindRuleWithOverride(c, spec, dartName); ok {
+		return override.Rel(from.Repo, from.Pkg).String()
 	}
+	for _, m := range ix.FindRulesByImportWithConfig(c, spec, dartName) {
+		if !m.IsSelfImport(from) {
+			return m.Label.Rel(from.Repo, from.Pkg).String()
+		}
+	}
+	if pubDepsRepo != "" {
+		return label.New(pubDepsRepo, "", pkg).String()
+	}
+	return label.New(pkg, "", pkg).String()
+}
+
+func resolveFiles(c *config.Config, ix *resolve.RuleIndex, uris []string, from label.Label, deps *[]string) bool {
 	all := true
 	for _, uri := range uris {
 		spec := resolve.ImportSpec{Lang: dartName, Imp: uri}
@@ -164,35 +206,32 @@ func resolveFiles(c *config.Config, ix *resolve.RuleIndex, uris []string, from l
 			*deps = append(*deps, override.Rel(from.Repo, from.Pkg).String())
 			continue
 		}
-		matches := ix.FindRulesByImportWithConfig(c, spec, dartName)
-		if len(matches) == 0 {
-			all = false
-			continue
+		var others []resolve.FindResult
+		self := false
+		for _, m := range ix.FindRulesByImportWithConfig(c, spec, dartName) {
+			if m.IsSelfImport(from) {
+				self = true
+			} else {
+				others = append(others, m)
+			}
 		}
-		if hasSelf(matches, from) {
-			continue
-		}
-		if len(matches) > 1 {
-			// As Gazelle's Go extension does: no guess, and say so.
+		switch {
+		case self:
+		case len(others) == 1:
+			*deps = append(*deps, others[0].Label.Rel(from.Repo, from.Pkg).String())
+		case len(others) > 1:
 			var labels []string
-			for _, m := range matches {
+			for _, m := range others {
 				labels = append(labels, m.Label.String())
 			}
-			log.Printf("%s: %s is in more than one rule (%s); add a # gazelle:resolve dart directive to choose", from, uri, strings.Join(labels, ", "))
-			continue
+			log.Printf("dart: %s: %s is in more than one rule (%s); add a "+
+				"`# gazelle:resolve dart %s <label>` directive to choose",
+				from, uri, strings.Join(labels, ", "), uri)
+		default:
+			all = false
 		}
-		*deps = append(*deps, matches[0].Label.Rel(from.Repo, from.Pkg).String())
 	}
 	return all
-}
-
-func hasSelf(matches []resolve.FindResult, from label.Label) bool {
-	for _, m := range matches {
-		if m.IsSelfImport(from) {
-			return true
-		}
-	}
-	return false
 }
 
 func dedupe(deps []string) []string {

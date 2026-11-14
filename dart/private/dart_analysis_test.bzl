@@ -13,8 +13,11 @@ diagnostic or a formatting violation fails the build of this test, and the test
 binary itself passes through.
 """
 
-load("//dart/private:common.bzl", "test_executable")
+load("//dart/private:common.bzl", "launcher_executable")
 load("//dart/private:dart_analyze_aspect.bzl", "NO_ANALYZE_TAG", "NO_FORMAT_TAG", "dart_analyze")
+load("//dart/private:runtime.bzl", "web_platforms_transition")
+
+visibility("//dart/...")
 
 _CHECKS = ["dart_analyze", "dart_format"]
 
@@ -29,7 +32,7 @@ def _dart_analysis_test_impl(ctx):
                   "source of its own, or is tagged both `%s` and `%s`. Drop it " +
                   "from `targets`.") % (ctx.label, target.label, NO_ANALYZE_TAG, NO_FORMAT_TAG))
         stamps.extend(checks)
-    noop = test_executable(ctx, ctx.attr._tool)
+    noop = launcher_executable(ctx, ctx.attr._tool)
     return [DefaultInfo(
         executable = noop.executable,
         runfiles = ctx.runfiles(transitive_files = depset(transitive = stamps)).merge(noop.runfiles),
@@ -43,6 +46,15 @@ dart_analysis_test = rule(
             aspects = [dart_analyze],
             allow_empty = False,
             mandatory = True,
+            cfg = web_platforms_transition,
+        ),
+        "web_platforms": attr.label_list(
+            doc = "Web platforms to check `targets` on, each as a web binary would build it: " +
+                  "`@rules_dart//dart/platforms:js`, `:wasm`, or a platform of your own carrying " +
+                  "`@rules_dart//dart/constraints:js` or `:wasm`. Each target is checked once per " +
+                  "platform listed, and not on the build's own. For web-only code, which every " +
+                  "other platform skips as incompatible.",
+            providers = [platform_common.PlatformInfo],
         ),
         "_tool": attr.label(
             default = "//dart/private/tools:noop",
@@ -54,7 +66,7 @@ dart_analysis_test = rule(
     doc = """Runs the `dart_analyze` aspect's checks on targets `bazel test //...` cannot reach.
 
 For a target tagged `manual`, or a fixture that must not be built by a
-wildcard, list it here: the test fails to build if `dart analyze` reports
+wildcard, list it here: the test fails to build if the analyzer reports
 anything in the target's own files, or if `dart format` would change one. Both
 checks run on every listed target, less whatever its `no-dart-analyze` or
 `no-dart-format` tag removes, under the options the

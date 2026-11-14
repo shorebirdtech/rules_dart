@@ -1,0 +1,43 @@
+# Runfiles-layout proof: with a stale `lib/user.g.dart` committed next to
+# `lib/user.dart`, Bazel's declared output wins in `:user_test`'s runfiles.
+
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_library",
+    "dart_package_metadata",
+    "dart_test",
+)
+load("@rules_dart//dart/ext/json_serializable:defs.bzl", "json_serializable_codegen")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "source_tree_generated",
+    language_version = "3.11",
+)
+
+json_serializable_codegen(
+    name = "user_codegen",
+    srcs = ["lib/user.dart"],
+    package = ":pubspec-metadata",
+)
+
+dart_library(
+    name = "user",
+    srcs = [
+        "lib/user.dart",
+        ":user_codegen",
+    ],
+    package = ":pubspec-metadata",
+    visibility = ["//visibility:public"],
+    deps = ["@pub_deps//:json_annotation"],
+)
+
+dart_test(
+    name = "user_test",
+    size = "small",
+    main = "test/user_test.dart",
+    deps = [
+        ":user",
+        "@pub_deps//:test",
+    ],
+)

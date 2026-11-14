@@ -2,8 +2,11 @@
 # Hooks run with prek (https://github.com/j178/prek), which reads this
 # pre-commit format. See https://pre-commit.com/hooks.html for more hooks
 # The commit message check runs in commit-msg stage
-# but we don't want to run the other hooks on commit messages
-default_stages: [pre-commit]
+# but we don't want to run the other hooks on commit messages. The manual
+# stage runs every check without .bazel_env, for Windows (see below).
+default_stages: [pre-commit, manual]
+# The pubspec reader's test inputs are read byte for byte, invalid YAML included.
+exclude: ^dart/pub/private/pubspec_reader/tests/testdata/
 # One `prek install` sets up both stages
 default_install_hook_types: [pre-commit, commit-msg]
 # Use a slightly older version of node by default
@@ -18,7 +21,6 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      - id: check-executables-have-shebangs
       - id: check-shebang-scripts-are-executable
       - id: check-toml
       - id: check-yaml
@@ -26,30 +28,94 @@ repos:
       - id: detect-private-key
       - id: end-of-file-fixer
       - id: trailing-whitespace
-  # Check formatting and lint for starlark code
-  - repo: https://github.com/keith/pre-commit-buildifier
-    rev: 10.1.0
-    hooks:
-      - id: buildifier
-      - id: buildifier-lint
-  # Enforce the commit message policy in AGENTS.md: a conventional-commit
-  # subject and the `Changelog:` trailer rules
-  - repo: local
-    hooks:
-      - id: commit-message
-        name: commit message policy
-        entry: bazel run --ui_event_filters=-info --noshow_progress --show_result=0 //tools/changelog:check --
-        language: system
-        stages: [commit-msg]
   - repo: https://github.com/pre-commit/mirrors-prettier
     rev: v3.1.0
     hooks:
       - id: prettier
-  - repo: https://github.com/google/yamlfmt
-    rev: v0.21.0
+  # The hooks overhead supplies, at the versions it pins: the commit message
+  # policy in AGENTS.md (a conventional-commit subject and the `Changelog:`
+  # trailer rules), buildifier, yamlfmt, typos and actionlint. They run
+  # overhead's tools from .bazel_env/bin, without Bazel. Set that up once in
+  # each checkout and worktree, and after bumping overhead's pin
+  # (a hook failing with "No such file or directory" means it is missing):
+  #   bazel run --noincompatible_auto_exec_groups @overhead//:bazel_env
+  # CI builds .bazel_env and runs these. The manual-stage copies run the same
+  # tools through `bazel run`, for Windows, where bazel_env does not run;
+  # multitool's Windows launchers need the runfiles tree, and they are .bat
+  # files, which cmd.exe limits to 8191 characters of command line; prek would
+  # batch by the OS limit (32k), so the manual hooks take 20 files at a time:
+  #   bazel run --enable_runfiles @overhead//lint:prek -- run --hook-stage manual --all-files
+  - repo: local
     hooks:
+      - id: commit-message
+        name: commit message policy
+        entry: .bazel_env/bin/check-commit-messages
+        language: system
+        stages: [commit-msg]
+      - id: buildifier
+        name: buildifier
+        entry: .bazel_env/bin/buildifier -mode=fix -lint=fix
+        language: system
+        files: '^(.*/)?(.*\.bzl|.*\.sky|.*\.bazel|BUILD|.*\.BUILD|BUILD\..*\.oss|WORKSPACE|WORKSPACE\.bzlmod|WORKSPACE\.oss|WORKSPACE\..*\.oss)$'
+        stages: [pre-commit]
+      - id: buildifier-lint
+        name: buildifier lint
+        entry: .bazel_env/bin/buildifier -mode=check -lint=warn
+        language: system
+        files: '^(.*/)?(.*\.bzl|.*\.sky|.*\.bazel|BUILD|.*\.BUILD|BUILD\..*\.oss|WORKSPACE|WORKSPACE\.bzlmod|WORKSPACE\.oss|WORKSPACE\..*\.oss)$'
+        stages: [pre-commit]
       - id: yamlfmt
-  - repo: https://github.com/crate-ci/typos
-    rev: v1.51.1
-    hooks:
+        name: yamlfmt
+        entry: .bazel_env/bin/yamlfmt
+        language: system
+        types: [yaml]
+        stages: [pre-commit]
       - id: typos
+        name: typos
+        entry: .bazel_env/bin/typos --force-exclude
+        language: system
+        types: [text]
+        stages: [pre-commit]
+      - id: actionlint
+        name: actionlint
+        entry: .bazel_env/bin/actionlint
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        types: [yaml]
+        stages: [pre-commit]
+      - id: yamlfmt
+        name: yamlfmt
+        entry: bazel run --enable_runfiles --ui_event_filters=-info --noshow_progress --show_result=0 @overhead//lint:yamlfmt --
+        language: system
+        types: [yaml]
+        pass_filenames: 20
+        stages: [manual]
+      - id: typos
+        name: typos
+        entry: bazel run --enable_runfiles --ui_event_filters=-info --noshow_progress --show_result=0 @overhead//lint:typos -- --force-exclude
+        language: system
+        types: [text]
+        pass_filenames: 20
+        stages: [manual]
+      - id: actionlint
+        name: actionlint
+        entry: bazel run --enable_runfiles --ui_event_filters=-info --noshow_progress --show_result=0 @overhead//lint:actionlint --
+        language: system
+        files: ^\.github/workflows/.*\.ya?ml$
+        types: [yaml]
+        pass_filenames: 20
+        stages: [manual]
+      - id: buildifier
+        name: buildifier
+        entry: bazel run --enable_runfiles --ui_event_filters=-info --noshow_progress --show_result=0 @overhead//lint:buildifier -- -mode=fix -lint=fix
+        language: system
+        files: '^(.*/)?(.*\.bzl|.*\.sky|.*\.bazel|BUILD|.*\.BUILD|BUILD\..*\.oss|WORKSPACE|WORKSPACE\.bzlmod|WORKSPACE\.oss|WORKSPACE\..*\.oss)$'
+        pass_filenames: 20
+        stages: [manual]
+      - id: buildifier-lint
+        name: buildifier lint
+        entry: bazel run --enable_runfiles --ui_event_filters=-info --noshow_progress --show_result=0 @overhead//lint:buildifier -- -mode=check -lint=warn
+        language: system
+        files: '^(.*/)?(.*\.bzl|.*\.sky|.*\.bazel|BUILD|.*\.BUILD|BUILD\..*\.oss|WORKSPACE|WORKSPACE\.bzlmod|WORKSPACE\.oss|WORKSPACE\..*\.oss)$'
+        pass_filenames: 20
+        stages: [manual]

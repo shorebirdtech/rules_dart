@@ -1,0 +1,15 @@
+load("@rules_dart//dart:defs.bzl", "dart_library")
+
+# gazelle:dart_package_name generated_in_source_tree_update
+
+dart_library(
+    name = "generated_in_source_tree_update",
+    srcs = [
+        "lib/user.dart",
+        "lib/user.freezed.dart",
+        "lib/user.g.dart",
+    ],
+    package_name = "generated_in_source_tree_update",
+    visibility = ["//visibility:public"],
+    deps = ["@json_annotation"],
+)

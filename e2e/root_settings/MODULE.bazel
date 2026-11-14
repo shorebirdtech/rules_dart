@@ -1,0 +1,172 @@
+# Fixtures that cannot live in e2e/examples because they clash with an example
+# there over a root-level setting or a version every module shares. Each
+# section below belongs to one directory.
+module(name = "root_settings_e2e")
+
+bazel_dep(name = "rules_dart", version = "0.0.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+local_path_override(
+    module_name = "rules_dart",
+    path = "../..",
+)
+
+dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
+dart.toolchain(dart_version = "3.13.7")
+use_repo(dart, "dart_toolchains")
+
+register_toolchains("@dart_toolchains//:all")
+
+pub = use_extension("@rules_dart//dart/pub:extensions.bzl", "pub")
+
+# The lint ruleset the `dart_analyze` aspect applies (BUILD.bazel).
+pub.package(
+    name = "very_good_analysis",
+    sha256 = "0bd5eb8d6be76aa0d71e70cbdae6cac8f784f761170568e3c2214a6948c7f6d3",
+    version = "11.0.0",
+)
+use_repo(pub, "very_good_analysis")
+
+# pub_versions/: every statement of a package's version is a request, the
+# highest is built for the whole build, and raising one of the root's own
+# requests prints a warning. CI greps a build's output for those warnings, and
+# for their absence, so every root request here is one a fixture states on
+# purpose; in e2e/examples they would print on every build.
+
+# pub_versions/highest_wins: the root's `pub.package()` asks for `tuple` 2.0.1
+# and mod_c's lock raises it to 2.0.2; mod_b asks for `path` 1.9.0 and mod_c's
+# lock raises it to 1.9.1, which prints nothing.
+bazel_dep(name = "mod_b", version = "0.0.0")
+local_path_override(
+    module_name = "mod_b",
+    path = "pub_versions/highest_wins/mod_b",
+)
+
+bazel_dep(name = "mod_c", version = "0.0.0")
+local_path_override(
+    module_name = "mod_c",
+    path = "pub_versions/highest_wins/mod_c",
+)
+
+pub.package(
+    name = "tuple",
+    sha256 = "0ea99cd2f9352b2586583ab2ce6489d1f95a5f6de6fb9492faaf97ae2060f0aa",
+    version = "2.0.1",
+)
+pub.from_lock(
+    name = "pkgconf",
+    lock = "//pub_versions/highest_wins:pubspec.lock",
+)
+use_repo(pub, "pkgconf", "tuple")
+
+# pub_versions/override_root_lock: the root's lock asks for `path` 1.9.1 and
+# dep_mod's `pub.package()` for 1.9.0, so the root's lock serves dep_mod's
+# repository too.
+bazel_dep(name = "dep_mod", version = "0.0.0")
+local_path_override(
+    module_name = "dep_mod",
+    path = "pub_versions/override_root_lock/dep_mod",
+)
+
+pub.from_lock(
+    name = "rootlock",
+    lock = "//pub_versions/override_root_lock:pubspec.lock",
+)
+use_repo(pub, "rootlock")
+
+# pub_versions/lock_upgrade: lock_a has `equatable` 2.0.8 and lock_b 2.0.7, a
+# package nothing else in the build asks for, so lock_b's request is raised by
+# lock_a's alone and the build warns of it; lock_newer has get_it newer than
+# rules_dart's own tool lock, whose request is raised silently.
+pub.from_lock(
+    name = "deps_a",
+    lock = "//pub_versions/lock_upgrade:lock_a.lock",
+)
+pub.from_lock(
+    name = "deps_b",
+    lock = "//pub_versions/lock_upgrade:lock_b.lock",
+)
+pub.from_lock(
+    name = "deps_newer",
+    lock = "//pub_versions/lock_upgrade:lock_newer.lock",
+)
+use_repo(pub, "deps_a", "deps_b", "deps_newer")
+
+# pub_versions/hub_surface: the lock has `collection` 1.19.0 and the root's
+# `pub.package()` asks for 1.19.1, which wins; the hub still exposes it.
+pub.from_lock(
+    name = "surface",
+    lock = "//pub_versions/hub_surface:pubspec.lock",
+)
+pub.package(
+    name = "collection",
+    sha256 = "2f5709ae4d3d59dd8f7cd309b4e023046b57d8a6c82130785d2b0e5868084e76",
+    version = "1.19.1",
+)
+use_repo(pub, "collection", "surface")
+
+# pub_package_cycle: `dio` and `dio_web_adapter`, which depend on each other,
+# declared with `pub.package()` rather than locked; the lock supplies what they
+# depend on. e2e/examples' pub/cycle builds the same two from a lock, with no
+# declaration, which these would replace for the whole build.
+pub.package(
+    name = "dio",
+    sha256 = "852ec3b48cc431ac04fff978413c541502b67ffc3e26921e74e3d994694192c1",
+    version = "5.11.1",
+)
+pub.package(
+    name = "dio_web_adapter",
+    sha256 = "3a1b2cd7be71086f38504956e3ebcd2837288d231ff454bafa78021244102bfc",
+    version = "2.2.2",
+)
+pub.from_lock(
+    name = "deps",
+    lock = "//pub_package_cycle:pubspec.lock",
+)
+
+# rules_dart's curated cycles declare this one already; the root's declaration
+# of the same packages agrees with it.
+pub.cycle(packages = [
+    "dio",
+    "dio_web_adapter",
+])
+use_repo(pub, "deps", "dio", "dio_web_adapter")
+
+# pub_resolve_wrong_package: a `resolve` mapping `characters` to a target that
+# builds a different package, which analysis refuses. A mapping replaces the
+# package for every module, and e2e/examples' web examples use `characters`.
+pub.from_lock(
+    name = "wrong_package_deps",
+    lock = "//pub_resolve_wrong_package:pubspec.lock",
+    resolve = {"characters": "//pub_resolve_wrong_package/not_characters"},
+)
+use_repo(pub, "wrong_package_deps")
+
+# pub_unsupplied: `xml` depends on `petitparser`, which the lock lists as an
+# `sdk` package that nothing fetches; `@ovr//:xml` fails when it is fetched.
+# e2e/examples' pub/resolve maps `petitparser` for the whole build, which
+# would supply it.
+pub.from_lock(
+    name = "ovr",
+    lock = "//pub_unsupplied:pubspec.lock",
+)
+use_repo(pub, "ovr")
+
+# pub_package_padded: pub.dev serves nested 1.0.0 with bytes after the end of
+# its gzip stream. Whichever way a package is declared, pub.dev's archives
+# must fetch. Its pubspec depends on `flutter`, which the lock lists as an SDK
+# package and `resolve` maps to a stand-in, so the dependency is supplied. A
+# mapping replaces the package for every module, and e2e/examples'
+# fixtures/pub_missing_dep needs nothing to supply `flutter`.
+pub.from_lock(
+    name = "sdk",
+    lock = "//pub_package_padded:pubspec.lock",
+    resolve = {"flutter": "//pub_package_padded/flutter"},
+)
+pub.package(
+    name = "nested",
+    sha256 = "03bac4c528c64c95c722ec99280375a6f2fc708eec17c7b3f07253b626cd2a20",
+    version = "1.0.0",
+)
+use_repo(pub, "nested", "sdk")

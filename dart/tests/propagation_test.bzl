@@ -7,16 +7,17 @@ gets you its assets with no opt-in.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
-load("//dart:providers.bzl", "DartCodeAssetInfo", "DartInfo", "DartPackageInfo")
+load("//dart:providers.bzl", "DartCodeAssetInfo", "DartInfo")
 load("//dart/private:common.bzl", "merge_package_records", "package_agreement_error", "package_code_assets", "resolve_code_assets")
+load("//dart/private:package_info.bzl", "raw_dart_package_info")
 load(":small_suite.bzl", "small_unittest_suite")
 
 _L = "//pkg:consumer"
 
-def _asset(asset_id, owner_path = "libfoo.so", link_mode = "dynamic_loading_bundle", system_uri = ""):
+def _asset(asset_id, owner_path = "libfoo.so", link_mode = "dynamic_loading_bundle", uri = ""):
     """A DartCodeAssetInfo stand-in.
 
-    `dynamic_library` needs only the `owner` and `path` of a `File`.
+    `file` needs only the `owner` and `path` of a `File`.
     """
     library = None
     if link_mode == "dynamic_loading_bundle":
@@ -24,17 +25,27 @@ def _asset(asset_id, owner_path = "libfoo.so", link_mode = "dynamic_loading_bund
     return DartCodeAssetInfo(
         asset_id = asset_id,
         link_mode = link_mode,
-        dynamic_library = library,
-        system_uri = system_uri,
+        file = library,
+        uri = uri,
     )
 
-def _pkg(package_name, lib_root, code_assets = (), version = "", language_version = ""):
-    return DartPackageInfo(
+# Built raw, not through `DartPackageInfo(...)`: that takes the code assets as
+# targets providing `DartCodeAssetInfo`, and these tests have values.
+def _pkg(package_name, package_root, code_assets = (), version = "", language_version = ""):
+    return raw_dart_package_info(
+        label = None,
         package_name = package_name,
-        lib_root = lib_root,
+        package_root = package_root,
         version = version,
         language_version = language_version,
         code_assets = code_assets,
+        data_assets = (),
+        unreplaced_hook = "",
+        link_hook = None,
+        link_hook_assets = (),
+        linked_code_assets = (),
+        license_file = None,
+        metadata = None,
     )
 
 # --- resolve_code_assets ---
@@ -77,7 +88,7 @@ def _resolve_explicit_replaces_transitive_test_impl(ctx):
         [_asset("package:a/a.g.dart", "liba_manual.so")],
     )
     asserts.equals(env, ["package:b/b.g.dart", "package:a/a.g.dart"], [r.asset_id for r in result])
-    asserts.equals(env, "liba_manual.so", result[1].dynamic_library.owner)
+    asserts.equals(env, "liba_manual.so", result[1].file.owner)
     return unittest.end(env)
 
 def _resolve_explicit_settles_conflicting_deps_test_impl(ctx):
@@ -90,18 +101,18 @@ def _resolve_explicit_settles_conflicting_deps_test_impl(ctx):
         [_asset("package:a/a.g.dart", "liba_two.so")],
     )
     asserts.equals(env, ["package:a/a.g.dart"], [r.asset_id for r in result])
-    asserts.equals(env, "liba_two.so", result[0].dynamic_library.owner)
+    asserts.equals(env, "liba_two.so", result[0].file.owner)
     return unittest.end(env)
 
 def _resolve_keeps_non_bundle_modes_test_impl(ctx):
     env = unittest.begin(ctx)
     result = resolve_code_assets(_L, [
-        _asset("package:a/a.g.dart", link_mode = "dynamic_loading_system", system_uri = "liba.so.0"),
+        _asset("package:a/a.g.dart", link_mode = "dynamic_loading_system", uri = "liba.so.0"),
         _asset("package:b/b.g.dart", link_mode = "dynamic_loading_process"),
     ], [])
     asserts.equals(env, 2, len(result))
-    asserts.equals(env, None, result[0].dynamic_library)
-    asserts.equals(env, "liba.so.0", result[0].system_uri)
+    asserts.equals(env, None, result[0].file)
+    asserts.equals(env, "liba.so.0", result[0].uri)
     return unittest.end(env)
 
 # --- merge_package_records: dedup and asset union ---
@@ -109,7 +120,7 @@ def _resolve_keeps_non_bundle_modes_test_impl(ctx):
 def _two_hubs_supply_one_package_test_impl(ctx):
     # Regression: two independent pub hubs — rules_flutter's `flutter.pub()`
     # and rules_dart's `pub.from_lock()` — each generate a spoke for `ffi`,
-    # giving one package name two `lib_root`s. This is normal, not an error.
+    # giving one package name two `package_root`s. This is normal, not an error.
     # The same shape arises from a package deliberately split across
     # `dart_library` targets, which `colocate_packages` exists to support.
     env = unittest.begin(ctx)
@@ -122,7 +133,7 @@ def _two_hubs_supply_one_package_test_impl(ctx):
     asserts.equals(env, ["ffi", "meta"], [p.package_name for p in packages])
 
     # First record wins for source resolution, as it always has.
-    asserts.equals(env, "../rules_flutter++flutter+deps__ffi", packages[0].lib_root)
+    asserts.equals(env, "../rules_flutter++flutter+deps__ffi", packages[0].package_root)
     return unittest.end(env)
 
 def _unions_assets_across_differing_roots_test_impl(ctx):
@@ -155,43 +166,22 @@ def _collect_unions_same_root_assets_test_impl(ctx):
 def _union_keeps_other_fields_test_impl(ctx):
     # The union branch rebuilds the kept record. Everything it was carrying
     # besides the assets has to survive that rebuild — `language_version`
-    # wrong means a package compiles under the wrong Dart semantics, and a
-    # lost `has_unreplaced_hook` means the build stops warning about a native
-    # library that will not be there at runtime.
+    # wrong means a package compiles under the wrong Dart semantics.
     env = unittest.begin(ctx)
-    kept = DartPackageInfo(
-        package_name = "dual",
-        lib_root = "first/dual",
-        version = "1.2.3",
-        language_version = "3.4",
-        code_assets = (_asset("package:dual/a.g.dart"),),
-        has_unreplaced_hook = "hook/build.dart",
-    )
+    kept = _pkg("dual", "first/dual", (_asset("package:dual/a.g.dart"),), version = "1.2.3", language_version = "3.4")
     packages = merge_package_records([
         kept,
         _pkg("dual", "second/dual", (_asset("package:dual/b.g.dart", "libb.so"),)),
     ])
     asserts.equals(env, 1, len(packages))
-    asserts.equals(env, "first/dual", packages[0].lib_root)
+    asserts.equals(env, "first/dual", packages[0].package_root)
     asserts.equals(env, "1.2.3", packages[0].version)
     asserts.equals(env, "3.4", packages[0].language_version)
-    asserts.equals(env, "hook/build.dart", packages[0].has_unreplaced_hook)
     asserts.equals(
         env,
         ["package:dual/a.g.dart", "package:dual/b.g.dart"],
         [a.asset_id for a in package_code_assets(packages[0])],
     )
-    return unittest.end(env)
-
-def _collect_tolerates_missing_field_test_impl(ctx):
-    # DartPackageInfo produced outside rules_dart (rules_flutter builds its
-    # own) omits `code_assets`; that must not crash the collector.
-    env = unittest.begin(ctx)
-    packages = merge_package_records([
-        DartPackageInfo(package_name = "legacy", lib_root = "legacy"),
-    ])
-    asserts.equals(env, 1, len(packages))
-    asserts.equals(env, (), package_code_assets(packages[0]))
     return unittest.end(env)
 
 # --- package_agreement_error: disagreeing duplicates ---
@@ -226,17 +216,15 @@ def _agreement_rejects_disagreeing_versions_test_impl(ctx):
     asserts.true(
         env,
         "../rules_dart++pub+dart_pub__ffi" in err,
-        "message names each record's lib_root",
+        "message names each record's package_root",
     )
     return unittest.end(env)
 
 def _agreement_tolerates_one_sided_version_test_impl(ctx):
-    # The adoption path. A `DartPackageInfo` from a producer that has not
-    # adopted `version` — any rule set outside rules_dart, on its own schedule,
-    # and `//dart/tests/no_lv_fixture` in this repo — carries "". Comparing an
-    # empty against a known version would fail every dual-hub build
-    # immediately, including the agreeing ones, so only two *known* versions
-    # can disagree.
+    # A package that states no `version` (a `dart_library` written by hand)
+    # carries "". Comparing an empty against a known version would fail every
+    # dual-hub build immediately, including the agreeing ones, so only two
+    # *known* versions can disagree.
     env = unittest.begin(ctx)
     err = package_agreement_error([
         _pkg("ffi", "../rules_flutter++flutter+deps__ffi"),
@@ -278,18 +266,6 @@ def _agreement_ignores_distinct_packages_test_impl(ctx):
     err = package_agreement_error([
         _pkg("a", "first/a", version = "1.0.0", language_version = "3.7"),
         _pkg("b", "first/b", version = "2.0.0", language_version = "3.4"),
-    ])
-    asserts.equals(env, None, err)
-    return unittest.end(env)
-
-def _agreement_tolerates_records_without_the_field_test_impl(ctx):
-    # A `DartPackageInfo` from a producer predating `version` omits the field
-    # entirely rather than carrying "". Reads must be tolerant, as they are for
-    # `code_assets` and `language_version`.
-    env = unittest.begin(ctx)
-    err = package_agreement_error([
-        DartPackageInfo(package_name = "legacy", lib_root = "first/legacy"),
-        _pkg("legacy", "second/legacy", version = "1.0.0"),
     ])
     asserts.equals(env, None, err)
     return unittest.end(env)
@@ -351,7 +327,7 @@ def _agreement_reports_both_fields_together_test_impl(ctx):
     )
     asserts.true(
         env,
-        "Set `language_version` consistently on every" in err,
+        "state the same\n`language_version`" in err,
         "the language-version remedy is present",
     )
     return unittest.end(env)
@@ -387,7 +363,7 @@ def _manifest_contains_test_impl(ctx):
     """Asserts the binary's generated native_assets.yaml names the asset.
 
     The probe above proves the provider graph carries the asset; this proves
-    the terminal rule actually writes it into the manifest `gen_kernel`
+    the terminal rule actually writes it into the manifest `frontend_server`
     embeds — which is what makes it resolvable at runtime.
     """
     env = analysistest.begin(ctx)
@@ -475,7 +451,6 @@ _t1_test = unittest.make(_resolve_explicit_matching_transitive_test_impl)
 _t2_test = unittest.make(_resolve_unions_distinct_test_impl)
 _t3_test = unittest.make(_resolve_keeps_non_bundle_modes_test_impl)
 _t4_test = unittest.make(_collect_unions_same_root_assets_test_impl)
-_t5_test = unittest.make(_collect_tolerates_missing_field_test_impl)
 _t6_test = unittest.make(_two_hubs_supply_one_package_test_impl)
 _t7_test = unittest.make(_unions_assets_across_differing_roots_test_impl)
 _t8_test = unittest.make(_union_keeps_other_fields_test_impl)
@@ -485,7 +460,6 @@ _t11_test = unittest.make(_agreement_tolerates_one_sided_version_test_impl)
 _t12_test = unittest.make(_agreement_rejects_disagreeing_language_versions_test_impl)
 _t13_test = unittest.make(_agreement_tolerates_one_sided_language_version_test_impl)
 _t14_test = unittest.make(_agreement_ignores_distinct_packages_test_impl)
-_t15_test = unittest.make(_agreement_tolerates_records_without_the_field_test_impl)
 _t16_test = unittest.make(_agreement_reports_every_disagreeing_package_test_impl)
 _t17_test = unittest.make(_agreement_reports_both_fields_together_test_impl)
 _t18_test = unittest.make(_resolve_explicit_replaces_transitive_test_impl)
@@ -504,7 +478,6 @@ def propagation_test_suite(name):
         _t2_test,
         _t3_test,
         _t4_test,
-        _t5_test,
         _t6_test,
         _t7_test,
         _t8_test,
@@ -514,7 +487,6 @@ def propagation_test_suite(name):
         _t12_test,
         _t13_test,
         _t14_test,
-        _t15_test,
         _t16_test,
         _t17_test,
         _t18_test,

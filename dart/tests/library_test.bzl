@@ -1,7 +1,9 @@
 """Unit tests for dart_library.bzl helpers."""
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts", "unittest")
-load("//dart/private:dart_library.bzl", "check_files_under_lib_root", "check_no_duplicate_srcs", "library_lib_root")
+load("//dart/private:common.bzl", "derive_package_name")
+load("//dart/private:dart_library.bzl", "check_files_under_package_root", "check_no_duplicate_srcs")
+load("//dart/private:package_root.bzl", "locate_package_root")
 
 def _stray_src_rejected_test_impl(ctx):
     # The helper is unit-tested below; this asserts `dart_library` actually
@@ -13,6 +15,16 @@ def _stray_src_rejected_test_impl(ctx):
 
 stray_src_rejected_test = analysistest.make(
     _stray_src_rejected_test_impl,
+    expect_failure = True,
+)
+
+def _nested_lib_rejected_test_impl(ctx):
+    env = analysistest.begin(ctx)
+    asserts.expect_failure(env, "named `lib` inside another `lib/`")
+    return analysistest.end(env)
+
+nested_lib_rejected_test = analysistest.make(
+    _nested_lib_rejected_test_impl,
     expect_failure = True,
 )
 
@@ -73,9 +85,9 @@ def _source_tree_vs_declared_output_collision_test_impl(ctx):
     )
     return unittest.end(env)
 
-def _lib_root_accepts_lib_sources_test_impl(ctx):
+def _package_root_accepts_lib_sources_test_impl(ctx):
     env = unittest.begin(ctx)
-    err = check_files_under_lib_root(
+    err = check_files_under_package_root(
         "//pkg:lib",
         "pkg",
         [
@@ -86,18 +98,18 @@ def _lib_root_accepts_lib_sources_test_impl(ctx):
     asserts.equals(env, None, err)
     return unittest.end(env)
 
-def _lib_root_accepts_root_package_test_impl(ctx):
-    # A root package has an empty lib_root; its sources sit at `lib/` directly.
+def _package_root_accepts_root_package_test_impl(ctx):
+    # A root package has an empty package_root; its sources sit at `lib/` directly.
     # Every e2e workspace's `//:rootlib` is this shape.
     env = unittest.begin(ctx)
-    err = check_files_under_lib_root("//:lib", "", [_fake_file("lib/a.dart", "lib/a.dart")])
+    err = check_files_under_package_root("//:lib", "", [_fake_file("lib/a.dart", "lib/a.dart")])
     asserts.equals(env, None, err)
     return unittest.end(env)
 
-def _lib_root_accepts_external_repo_test_impl(ctx):
-    # pub spokes: `derive_lib_root` yields `../<repo>` to match short_path.
+def _package_root_accepts_external_repo_test_impl(ctx):
+    # pub spokes: `derive_package_root` yields `../<repo>` to match short_path.
     env = unittest.begin(ctx)
-    err = check_files_under_lib_root(
+    err = check_files_under_package_root(
         "@dart_pub__path//:path",
         "../+pub+dart_pub__path",
         [_fake_file("x", "../+pub+dart_pub__path/lib/path.dart")],
@@ -105,12 +117,12 @@ def _lib_root_accepts_external_repo_test_impl(ctx):
     asserts.equals(env, None, err)
     return unittest.end(env)
 
-def _lib_root_rejects_source_outside_lib_test_impl(ctx):
-    # The reported case: a file beside `lib/` rather than inside it. Staging
-    # strips lib_root, so it lands outside `lib/` and no `package:` URI reaches
-    # it — previously surfacing only as a missing path at kernel-compile time.
+def _package_root_rejects_source_outside_lib_test_impl(ctx):
+    # A file beside `lib/` rather than inside it. Staging strips package_root, so
+    # it lands outside `lib/` and no `package:` URI reaches it; unchecked, it
+    # would surface only as a missing path at kernel-compile time.
     env = unittest.begin(ctx)
-    err = check_files_under_lib_root(
+    err = check_files_under_package_root(
         "//pkg:lib",
         "pkg",
         [_fake_file("pkg/config.g.dart", "pkg/config.g.dart")],
@@ -120,11 +132,11 @@ def _lib_root_rejects_source_outside_lib_test_impl(ctx):
     asserts.true(env, "pkg/lib/" in err, "should name the expected prefix: %s" % err)
     return unittest.end(env)
 
-def _lib_root_rejects_foreign_codegen_output_test_impl(ctx):
+def _package_root_rejects_foreign_codegen_output_test_impl(ctx):
     # A codegen target outside the Dart package root declares outputs relative
     # to its own package, so the path keeps that prefix and never resolves.
     env = unittest.begin(ctx)
-    err = check_files_under_lib_root(
+    err = check_files_under_package_root(
         "//pkg:lib",
         "pkg",
         [_fake_file("x", "pkg/gen/pkg/lib/item.g.dart")],
@@ -133,31 +145,62 @@ def _lib_root_rejects_foreign_codegen_output_test_impl(ctx):
     asserts.true(env, "codegen" in err, "should hint at the codegen case: %s" % err)
     return unittest.end(env)
 
-def _declared_root_test_impl(ctx):
+def _root_of(workspace_root, label_package, files = []):
+    return locate_package_root(workspace_root, label_package, [_fake_file(f, f) for f in files])
+
+def _package_root_from_path_test_impl(ctx):
     env = unittest.begin(ctx)
 
-    # No declaration, or one that doesn't sit above: the BUILD directory.
-    asserts.equals(env, "pkg", library_lib_root("pkg", None))
-    asserts.equals(env, "app", library_lib_root("app", "gen"))
+    # At the package root, and in its `lib/`: as before subdirectories counted.
+    asserts.equals(env, struct(root = "pkg", error = None), _root_of("", "pkg", ["pkg/lib/a.dart"]))
+    asserts.equals(env, struct(root = "pkg", error = None), _root_of("", "pkg/lib", ["pkg/lib/a.dart"]))
+    asserts.equals(env, struct(root = "", error = None), _root_of("", "lib"))
+    asserts.equals(env, struct(root = "", error = None), _root_of("", ""))
 
-    # Under the declaration's lib/: one directory of the declared package.
-    asserts.equals(env, "pkg", library_lib_root("pkg/lib/src/model", "pkg"))
-    asserts.equals(env, "", library_lib_root("lib/src/model", ""))
-    asserts.equals(env, "pkg", library_lib_root("pkg", "pkg"))
+    # In a directory under `lib/`: the directory above that `lib`.
+    asserts.equals(env, struct(root = "pkg", error = None), _root_of("", "pkg/lib/src/model", ["pkg/lib/src/model/m.dart"]))
+    asserts.equals(env, struct(root = "", error = None), _root_of("", "lib/src/model"))
 
-    # Below the declaration but outside its lib/ (a nested package, a test
-    # dir): its own root, as before.
-    asserts.equals(env, "pkg/packages/sub", library_lib_root("pkg/packages/sub", "pkg"))
-    asserts.equals(env, "pkg/library", library_lib_root("pkg/library", "pkg"))
+    # External repositories, whose directory name is never read for `lib`.
+    asserts.equals(env, struct(root = "../lib", error = None), _root_of("external/lib", ""))
+    asserts.equals(env, struct(root = "../r/pkg", error = None), _root_of("external/r", "pkg/lib/src"))
     return unittest.end(env)
 
-_declared_root_test = unittest.make(_declared_root_test_impl)
+def _package_root_ambiguous_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    # Two `lib` components in the BUILD file's own path.
+    err = _root_of("", "pkg/lib/src/lib").error
+    asserts.true(env, err != None and "//pkg/lib/src/lib" in err, "got %s" % err)
+
+    # One, with files under the target's own `lib/`: the package may be rooted
+    # there or above the outer `lib`.
+    err = _root_of("", "x/lib/y", ["x/lib/y/lib/a.dart"]).error
+    asserts.true(env, err != None and "x/lib/y/lib/a.dart" in err and "`//x`" in err, "got %s" % err)
+    err = _root_of("external/r", "x/lib/y", ["../r/x/lib/y/lib/a.dart"]).error
+    asserts.true(env, err != None, "expected an error in an external repository")
+    return unittest.end(env)
+
+def _package_name_from_root_test_impl(ctx):
+    env = unittest.begin(ctx)
+    asserts.equals(env, "pkg", derive_package_name("", "a/pkg", "t"))
+    asserts.equals(env, "pkg", derive_package_name("", "a/pkg/lib", "t"))
+    asserts.equals(env, "pkg", derive_package_name("", "a/pkg/lib/src/model", "t"))
+    asserts.equals(env, "t", derive_package_name("", "lib/src/model", "t"))
+    asserts.equals(env, "t", derive_package_name("", "", "t"))
+    asserts.equals(env, "named", derive_package_name("named", "a/pkg/lib/src", "t"))
+    return unittest.end(env)
+
+_package_root_from_path_test = unittest.make(_package_root_from_path_test_impl)
+_package_root_ambiguous_test = unittest.make(_package_root_ambiguous_test_impl)
+_package_name_from_root_test = unittest.make(_package_name_from_root_test_impl)
+
 _clean_srcs_test = unittest.make(_clean_srcs_no_error_test_impl)
-_lib_root_ok_test = unittest.make(_lib_root_accepts_lib_sources_test_impl)
-_lib_root_root_pkg_test = unittest.make(_lib_root_accepts_root_package_test_impl)
-_lib_root_external_test = unittest.make(_lib_root_accepts_external_repo_test_impl)
-_lib_root_outside_test = unittest.make(_lib_root_rejects_source_outside_lib_test_impl)
-_lib_root_codegen_test = unittest.make(_lib_root_rejects_foreign_codegen_output_test_impl)
+_package_root_ok_test = unittest.make(_package_root_accepts_lib_sources_test_impl)
+_package_root_root_pkg_test = unittest.make(_package_root_accepts_root_package_test_impl)
+_package_root_external_test = unittest.make(_package_root_accepts_external_repo_test_impl)
+_package_root_outside_test = unittest.make(_package_root_rejects_source_outside_lib_test_impl)
+_package_root_codegen_test = unittest.make(_package_root_rejects_foreign_codegen_output_test_impl)
 _identical_file_test = unittest.make(_identical_file_listed_twice_no_error_test_impl)
 _collision_test = unittest.make(_source_tree_vs_declared_output_collision_test_impl)
 
@@ -173,23 +216,27 @@ def library_test_suite(name):
     _clean_srcs_test(name = "library_clean_srcs_test", size = "small")
     _identical_file_test(name = "library_identical_file_test", size = "small")
     _collision_test(name = "library_collision_test", size = "small")
-    _lib_root_ok_test(name = "library_lib_root_ok_test", size = "small")
-    _declared_root_test(name = "library_declared_root_test", size = "small")
-    _lib_root_root_pkg_test(name = "library_lib_root_root_pkg_test", size = "small")
-    _lib_root_external_test(name = "library_lib_root_external_test", size = "small")
-    _lib_root_outside_test(name = "library_lib_root_outside_test", size = "small")
-    _lib_root_codegen_test(name = "library_lib_root_codegen_test", size = "small")
+    _package_root_ok_test(name = "library_package_root_ok_test", size = "small")
+    _package_root_root_pkg_test(name = "library_package_root_root_pkg_test", size = "small")
+    _package_root_external_test(name = "library_package_root_external_test", size = "small")
+    _package_root_outside_test(name = "library_package_root_outside_test", size = "small")
+    _package_root_codegen_test(name = "library_package_root_codegen_test", size = "small")
+    _package_root_from_path_test(name = "library_package_root_from_path_test", size = "small")
+    _package_root_ambiguous_test(name = "library_package_root_ambiguous_test", size = "small")
+    _package_name_from_root_test(name = "library_package_name_from_root_test", size = "small")
     native.test_suite(
         name = name,
         tests = [
             ":library_clean_srcs_test",
             ":library_identical_file_test",
             ":library_collision_test",
-            ":library_lib_root_ok_test",
-            ":library_declared_root_test",
-            ":library_lib_root_root_pkg_test",
-            ":library_lib_root_external_test",
-            ":library_lib_root_outside_test",
-            ":library_lib_root_codegen_test",
+            ":library_package_root_ok_test",
+            ":library_package_root_root_pkg_test",
+            ":library_package_root_external_test",
+            ":library_package_root_outside_test",
+            ":library_package_root_codegen_test",
+            ":library_package_root_from_path_test",
+            ":library_package_root_ambiguous_test",
+            ":library_package_name_from_root_test",
         ],
     )

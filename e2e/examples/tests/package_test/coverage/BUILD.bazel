@@ -1,0 +1,55 @@
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata", "dart_test")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "shapes",
+)
+
+# `bazel coverage --combined_report=lcov //package_test/coverage/...` reports
+# this library, `//tests/package_test/coverage/units`, the generated
+# `//tests/package_test/coverage/generated` and the tests' own files (as this
+# workspace's .bazelrc asks) from both tests, merged, without the lines and
+# files their `// coverage:ignore-*` comments name;
+# `//tests/package_test/coverage/check` checks the
+# report against the `// covered` and `// uncovered` marks in their sources.
+dart_library(
+    name = "shapes",
+    srcs = ["lib/shapes.dart"],
+    package = ":pubspec-metadata",
+    visibility = ["//tests/package_test/coverage:__subpackages__"],
+    deps = [
+        "//tests/package_test/coverage/excluded",
+        "//tests/package_test/coverage/units",
+    ],
+)
+
+exports_files(
+    [
+        "lib/shapes.dart",
+        "test/plain_test.dart",
+        "test/runner_test.dart",
+        "test/support.dart",
+    ],
+    visibility = ["//tests/package_test/coverage:__subpackages__"],
+)
+
+dart_test(
+    name = "plain_test",
+    size = "small",
+    srcs = ["test/support.dart"],
+    main = "test/plain_test.dart",
+    deps = [
+        ":shapes",
+        "//tests/package_test/coverage/generated",
+    ],
+)
+
+dart_test(
+    name = "runner_test",
+    size = "small",
+    main = "test/runner_test.dart",
+    deps = [
+        ":shapes",
+        "@pub_deps//:test",
+    ],
+)

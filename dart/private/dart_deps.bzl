@@ -7,11 +7,14 @@ Which attribute a dependency arrives through is the rule's business —
 attribute that is not a tool, plus the toolchains a rule lists in
 `DART_TOOLCHAIN_TYPES_ATTR`, and picks the dependencies out by
 `DartInfo.deps`, what the rule passed to `dart_info()`. A target reached that
-is not a library (a toolchain) hands on the libraries it holds, one hop, in its
+has no `DartInfo` (a toolchain, or an executable-like wrapper
+with only `DartAnalyzableInfo`) hands on the libraries it holds, one hop, in its
 provider's `exported`.
 """
 
 load("//dart:providers.bzl", "DartInfo")
+
+visibility("//dart/...")
 
 # A rule whose `DartInfo` dependencies come from a toolchain rather than an
 # attribute (`dart_proto_library`'s protobuf runtime) names the toolchain types
@@ -77,7 +80,7 @@ def forwarded_library(info, reached):
       The forwarded dependency Target, or `None`.
     """
     for dep in reached:
-        if DartInfo in dep and dep[DartInfo].srcs == info.srcs and dep[DartInfo].lib_root == info.lib_root:
+        if DartInfo in dep and dep[DartInfo].srcs == info.srcs and dep[DartInfo].packages == info.packages:
             return dep
     return None
 

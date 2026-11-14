@@ -19,6 +19,9 @@ type DartImport struct {
 
 var importRe = regexp.MustCompile(`^\s*(?:import|export)\s+['"](.+?)['"]`)
 
+// directiveRe matches a line starting an import or export directive.
+var directiveRe = regexp.MustCompile(`^\s*(?:import|export)\s`)
+
 // condLineRe detects continuation lines: indented "if (" clauses.
 var condLineRe = regexp.MustCompile(`^\s+if\s*\(`)
 
@@ -52,13 +55,18 @@ func ParseDartFile(path string) ([]DartImport, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := strings.Split(string(data), "\n")
+	// A directive is a line that starts `import` or `export` once comments
+	// and strings are blanked: one inside a string (a test's generated
+	// source, say) or a comment is no import. Its URI is read from the line
+	// with only comments blanked.
+	lines := strings.Split(stripCommentsOnly(string(data)), "\n")
+	code := strings.Split(stripCommentsAndStrings(string(data)), "\n")
 	var imports []DartImport
 
 	for i := 0; i < len(lines); i++ {
 		line := lines[i]
 		m := importRe.FindStringSubmatch(line)
-		if m == nil {
+		if m == nil || i >= len(code) || !directiveRe.MatchString(code[i]) {
 			continue
 		}
 		// Primary URI
@@ -93,28 +101,6 @@ func ParsePubspecName(dir string) string {
 			name = strings.Trim(name, "\"'")
 			return name
 		}
-	}
-	return ""
-}
-
-// FindPubspecName walks up from dir toward the repo root looking for
-// pubspec.yaml. rel is the workspace-relative path of dir; it bounds the
-// upward search so we never look above the repo root.
-func FindPubspecName(dir string, rel string) string {
-	current := dir
-	remaining := rel
-	for {
-		if name := ParsePubspecName(current); name != "" {
-			return name
-		}
-		if remaining == "" || remaining == "." {
-			break
-		}
-		remaining = filepath.Dir(remaining)
-		if remaining == "." {
-			remaining = ""
-		}
-		current = filepath.Dir(current)
 	}
 	return ""
 }
@@ -244,28 +230,6 @@ func majorMinor(s string) string {
 	return parts[0] + "." + parts[1]
 }
 
-// FindPubspecLanguageVersion walks up from dir toward the repo root
-// looking for a pubspec.yaml with an `environment.sdk` constraint. Same
-// search semantics as `FindPubspecName`.
-func FindPubspecLanguageVersion(dir string, rel string) string {
-	current := dir
-	remaining := rel
-	for {
-		if lv := ParsePubspecLanguageVersion(current); lv != "" {
-			return lv
-		}
-		if remaining == "" || remaining == "." {
-			break
-		}
-		remaining = filepath.Dir(remaining)
-		if remaining == "." {
-			remaining = ""
-		}
-		current = filepath.Dir(current)
-	}
-	return ""
-}
-
 // DartFileInfo holds metadata about a Dart source file.
 type DartFileInfo struct {
 	Path    string       // Relative path from package root
@@ -290,6 +254,21 @@ func ParseDartDir(dir string, files []string) ([]DartFileInfo, error) {
 		})
 	}
 	return result, nil
+}
+
+// topLevelMainRe matches a declaration of `main` at the start of a line,
+// after an optional return type: `void main(`, `Future<void> main(`,
+// `main(`.
+var topLevelMainRe = regexp.MustCompile(`(?m)^(?:[A-Za-z_$][\w$<>?, ]*[\s>?])?main\s*\(`)
+
+// HasTopLevelMain reports whether the Dart file at path declares a
+// top-level `main`, which makes it a program `dart run` can start.
+func HasTopLevelMain(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return topLevelMainRe.MatchString(stripCommentsAndStrings(string(data)))
 }
 
 // stripCommentsAndStrings replaces line/block comments and string literals
@@ -444,8 +423,9 @@ var builtInterfaceRe = regexp.MustCompile(
 // ParseDartCodegenTriggers returns every codegen trigger in the file at
 // path: all annotations (as ParseDartAnnotations) plus a synthetic
 // "BuiltValue" entry when the source implements `Built<T, B>` — idiomatic
-// built_value classes are annotation-free. The synthetic entry is only
-// appended when "BuiltValue" isn't already present as a real annotation.
+// built_value classes are annotation-free — and a synthetic
+// "JsonSerializable" entry for a freezed class with JSON (freezedJSONRe).
+// A synthetic entry is only appended when the real annotation is absent.
 func ParseDartCodegenTriggers(path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -456,20 +436,33 @@ func ParseDartCodegenTriggers(path string) ([]string, error) {
 	for _, m := range annotationRe.FindAllStringSubmatch(stripped, -1) {
 		out = append(out, m[1])
 	}
-	if builtInterfaceRe.MatchString(stripped) {
-		seen := false
+	has := func(names ...string) bool {
 		for _, a := range out {
-			if a == "BuiltValue" {
-				seen = true
-				break
+			for _, n := range names {
+				if a == n {
+					return true
+				}
 			}
 		}
-		if !seen {
-			out = append(out, "BuiltValue")
-		}
+		return false
+	}
+	if builtInterfaceRe.MatchString(stripped) && !has("BuiltValue") {
+		out = append(out, "BuiltValue")
+	}
+	if has("freezed", "Freezed") && freezedJSONRe.MatchString(stripped) &&
+		!has("JsonSerializable") {
+		out = append(out, "JsonSerializable")
 	}
 	return out, nil
 }
+
+// freezedJSONRe detects a freezed class that asks for JSON: a `fromJson`
+// factory, or `fromJson: true` / `toJson: true` on `@Freezed`. freezed then
+// writes a `@JsonSerializable` class into its `.freezed.dart`, which
+// json_serializable turns into the source's `.g.dart`, so the source needs
+// json_serializable though it names no annotation of its own.
+var freezedJSONRe = regexp.MustCompile(
+	`\bfactory\s+(?:[A-Za-z_$][\w$]*\.)?fromJson\s*\(|\b(?:fromJson|toJson)\s*:\s*true\b`)
 
 // partRe matches `part '<uri>';` directives (NOT `part of`). The
 // negative-lookahead-style filtering for `part of` is done at scan time.

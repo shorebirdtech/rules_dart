@@ -3,8 +3,10 @@
 ## Using devcontainers
 
 If you are using [devcontainers](https://code.visualstudio.com/docs/devcontainers/containers)
-and/or [codespaces](https://github.com/features/codespaces) then you can start
-contributing immediately and skip the next step.
+and/or [codespaces](https://github.com/features/codespaces), the container
+installs prek and the git hooks on start. It does not build `.bazel_env`, which
+most hooks run from: run the `@overhead//:bazel_env` command in the next
+section once the container is up.
 
 ## Formatting
 
@@ -24,10 +26,48 @@ without it prek keeps them and runs them too. The installed hook calls the prek 
 `uv tool upgrade prek` and `bazel clean`. Set `PREK_QUIET=1` in your shell
 profile for hooks that print nothing unless one fails.
 
-To run every hook without installing anything beyond Bazel:
+The commit message, buildifier, yamlfmt, typos and actionlint hooks run overhead's tools from
+`.bazel_env/bin`, without Bazel. Set that up in the main checkout, and again
+after any `bazel clean` or bump of overhead's pin:
 
 ```shell
-bazel run @multitool//tools/prek -- -C "$PWD" run --all-files
+bazel run --noincompatible_auto_exec_groups @overhead//:bazel_env
+```
+
+A hook that fails with "No such file or directory" means it is not set up.
+The flag is there because bazel_env 0.10.0 fails analysis under
+`--incompatible_auto_exec_groups`, which `.bazelrc` sets; it costs the next
+build a re-analysis, not a rebuild.
+
+A worktree made with `git worktree add` needs it too: run the command above in
+the worktree, or link its `.bazel_env` to the main checkout's.
+
+To run every hook over every file, as CI does:
+
+```shell
+prek run --all-files
+```
+
+On Windows, where bazel_env does not run, install the hooks without the six
+that need it:
+
+```shell
+prek install -f --skip commit-message --skip buildifier --skip buildifier-lint --skip yamlfmt --skip typos --skip actionlint
+```
+
+and before you push, run every check with the tools through `bazel run`
+instead. `--enable_runfiles` is needed by the Windows launchers of the pinned
+tools:
+
+```shell
+bazel run --enable_runfiles @overhead//lint:prek -- run --all-files --hook-stage manual
+```
+
+The manual stage has no commit-message check; check the commits you are about
+to push with
+
+```shell
+bazel run --enable_runfiles @overhead//changelog:check -- --range origin/main..HEAD
 ```
 
 ## Commit messages
@@ -38,71 +78,66 @@ the commit-msg hook that `prek install` sets up checks each commit before that.
 
 ## Running tests
 
-### Unit tests and Gazelle plugin tests (root workspace)
+### Unit tests (root workspace)
 
 ```shell
-bazel test //dart/tests:versions_test //dev:gazelle_test //dev:gazelle_generation_test
+bazel test //...
 ```
+
+The Gazelle plugin is the `rules_dart_gazelle_plugin` module in `gazelle/`,
+which `//...` does not reach. Its tests run from the root workspace,
+`bazel test @rules_dart_gazelle_plugin//... @rules_dart_dev//...`, and its
+generation tests are also in `e2e/examples/gazelle`. There Gazelle writes the
+BUILD files of `codegen/`, `cycle/`, `rally/` and `split/`, which that
+workspace builds and tests; run `bazel run //gazelle:gazelle -- gazelle` in
+`e2e/examples` after changing the plugin, and CI fails when it would change a
+BUILD file.
 
 ### End-to-end tests (separate Bazel workspaces)
 
-Each directory under `e2e/` is a self-contained Bazel workspace that tests rules_dart
-as an external dependency. Some contain `bazel test` targets, others verify that
-`bazel build` succeeds.
+The workspaces under `e2e/` use rules_dart as an external dependency:
 
 ```shell
-# Toolchain resolution
+# The install instructions, as the Bazel Central Registry checks them
 cd e2e/smoke && bazel test //...
 
-# dart_binary (native executable compilation)
-cd e2e/hello_world && bazel build //...
+# One example per feature, and fixtures/ for their edge cases
+cd e2e/examples && bazel test //...
 
-# Transitive dart_library dependencies
-cd e2e/library_deps && bazel build //...
-
-# The dart_analyze aspect: analysis and the format check
-cd e2e/analysis && bazel test //...
-
-# dart_test (Dart VM test execution)
-cd e2e/dart_test && bazel test //...
-
-# dart_test with pub dependencies
-cd e2e/dart_test_pkg && bazel test //...
-
-# Cross-compilation to other platforms
-cd e2e/cross_compile && bazel build //...
-
-# External pub.dev packages
-cd e2e/pub_deps && bazel build //...
-
-# pubspec.lock integration
-cd e2e/pub_lock && bazel build //...
-
-# dart compile js (web compilation)
-cd e2e/web_app && bazel build //...
+# Fixtures that need a root-level setting e2e/examples cannot share
+cd e2e/root_settings && bazel test //...
 ```
+
+Each workspace under `e2e/failures` must fail to resolve; CI's
+`expected-failure` job runs each and checks the error. Fixtures elsewhere that
+must fail are `manual`, and the same job builds each by name.
 
 ## Updating BUILD files
 
-Some targets are generated from sources.
-Currently this is just the `bzl_library` targets.
-Run `bazel run //:gazelle` to keep them up-to-date.
+Gazelle writes the `bzl_library` targets, and only those.
+Run `bazel run @rules_dart_dev//:gazelle` to keep them up-to-date; CI fails when
+it would change a BUILD file. It writes a new target's `deps` but leaves an
+existing target's alone, so a `load()` added to a file needs its `deps` entry
+by hand. For a public file, its API docs extraction fails the build without it,
+and `docs_test` in its package fails when a public symbol has no doc.
 
 ## Using this as a development dependency of other rules
 
 You'll commonly find that you develop in another repository that
 depends on rules_dart.
 
-To always tell Bazel to use this local checkout rather than a release
-artifact or a version fetched from the registry, run this from this
-directory:
+To tell Bazel to use this local checkout rather than a release artifact or a
+version fetched from the registry, put an override in the other repository's
+gitignored `.bazelrc.user` (its `.bazelrc` ends with
+`try-import %workspace%/.bazelrc.user`), running this from this directory:
 
 ```sh
-OVERRIDE="--override_module=rules_dart=$(pwd)"
-echo "common $OVERRIDE" >> ~/.bazelrc
+echo "common --override_module=rules_dart=$(pwd)" >> <other repository>/.bazelrc.user
 ```
 
-This means that any usage of `@rules_dart` on your system will point to this folder.
+The lock tools leave `.bazelrc.user` out, so the override never reaches a
+committed `MODULE.bazel.lock`. Do not put it in `~/.bazelrc`: every Bazel
+command on the machine reads that file, lock refreshes included.
 
 ## Releasing
 

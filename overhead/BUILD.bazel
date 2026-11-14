@@ -1,0 +1,48 @@
+load("@bazel_env.bzl", "bazel_env")
+load("@multitool//:tools.bzl", "TOOLS")
+load("@rules_dart//dart:defs.bzl", "dart_analysis_config", "dart_analysis_options")
+
+# How `Changelog:` trailers render as release notes, for every consumer.
+exports_files(
+    ["cliff.toml"],
+    visibility = ["//visibility:public"],
+)
+
+# The tools the commit hooks run, at the versions this module pins, as
+# `.bazel_env/bin/<name>` in the consumer's checkout root, so a hook runs
+# without Bazel. Set up, and brought up to date after a pin bump, with
+#   bazel run --noincompatible_auto_exec_groups @overhead//:bazel_env
+# The flag: bazel_env 0.10.0 fails analysis under
+# --incompatible_auto_exec_groups, which the consumers set.
+#
+# It must stay in this root package: `bazel run` puts the `.bazel_env`
+# symlink in the target's package directory, which for this package is the
+# consumer's root.
+#
+# bazel_env's launchers are bash, so it does not build on Windows; there the
+# hooks run in prek's `manual` stage through `bazel run` (README.md).
+bazel_env(
+    name = "bazel_env",
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    tools = {
+        "actionlint": "//lint:actionlint",
+        "buildifier": TOOLS["buildifier"],
+        "check-commit-messages": "//changelog:check",
+        "typos": TOOLS["typos"],
+        "yamlfmt": "//lint:yamlfmt_bin",
+    },
+)
+
+dart_analysis_options(
+    name = "analysis_options",
+    src = "analysis_options.yaml",
+    deps = ["@lints"],
+)
+
+dart_analysis_config(
+    name = "analysis_config",
+    options = [":analysis_options"],
+)

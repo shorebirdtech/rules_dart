@@ -11,200 +11,665 @@ on:
     - cron: "0 9 * * 1"
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+env:
+  # Part of every setup-bazel cache key below. A cache restored on an exact key
+  # hit is never saved again, so it freezes at whatever the first run put in
+  # it; bump this number to start the caches afresh. The Commit messages
+  # workflow (commit-messages.yaml) passes its own: bump that one too.
+  CACHE_VERSION: &cache_version "1"
 concurrency:
   # Cancel previous actions from the same PR or branch except 'main' branch.
   # See https://docs.github.com/en/actions/using-jobs/using-concurrency and https://docs.github.com/en/actions/learn-github-actions/contexts for more info.
   group: concurrency-group::${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}${{ github.ref_name == 'main' && format('::{0}', github.run_id) || ''}}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
+  # Every job below that runs its own steps has a timeout, one value per kind of
+  # job, at about three times its slowest recent run: 15 minutes for checks
+  # that run one or two commands, 30 for a Bazel build or test of one
+  # workspace, 60 for the whole-program run of the root workspace. A caller of
+  # a reusable workflow (`test`) cannot set one.
   test:
     uses: bazel-contrib/.github/.github/workflows/bazel.yaml@1d798ff015ed0696433e01e2c3ccbb2abefadad7 # v7.7.0
     with:
       bazel_versions: '["9.3.0"]'
-      # Exit code 4 means "build succeeded but no test targets found", which is
-      # expected for build-only e2e folders like web_app and pub_deps.
-      # Wrapped in bash -c because the reusable workflow uses the runner's
-      # default shell (PowerShell on Windows) where [ $? -eq 4 ] is invalid.
-      # Inner single quotes prevent the outer shell from expanding $?.
-      bazel_test_command: "bash -c 'bazel test --test_output=errors //... || [ $? -eq 4 ]'"
+      # The reusable workflow's own setup-bazel takes the same version, or
+      # bumping CACHE_VERSION would never reach this job's caches.
+      cache_version: *cache_version
+      # Every folder holds tests, so exit code 4 ("build succeeded but no test
+      # targets found") fails, and a folder whose tests vanish goes red.
+      bazel_test_command: "bazel test --test_output=errors //..."
       folders: |
         [
           ".",
           "e2e/smoke",
-          "e2e/hello_world",
-          "e2e/library_deps",
-          "e2e/analysis",
-          "e2e/dart_test",
-          "e2e/dart_test_pkg",
-          "e2e/codegen",
-          "e2e/pub_deps",
-          "e2e/pub_lock",
-          "e2e/web_app",
-          "e2e/gazelle",
-          "e2e/cross_compile",
-          "e2e/pub_lock_cross_module",
-          "e2e/pub_lock_dedup",
-          "e2e/pub_lock_upgrade",
-          "e2e/ext_exemplar",
-          "e2e/dual_build",
-          "e2e/fix",
-          "e2e/analyze_composition",
-          "e2e/link_hook"
+          "e2e/examples",
+          "e2e/root_settings",
+          "overhead",
+          "dev"
         ]
   # `dart format` and `dart analyze` find their configuration by walking up from
-  # the file they are given, and that walk does not stop at the project root. It
-  # used to escape: under a sandbox it found nothing (so a repo's configured
-  # page width was silently ignored), and unsandboxed it climbed into the
+  # the file they are given, and that walk does not stop at the project root.
+  # Unbounded, it escapes: under a sandbox it finds nothing (so a repo's
+  # configured page width is silently ignored), and unsandboxed it climbs into the
   # execroot — or, in manifest runfiles mode, ran against the source tree
-  # outright. Which of those happened decided the verdict, so the same code
-  # passed or failed depending on the flags.
+  # outright. Which of those happens decides the verdict, so the same code
+  # passes or fails depending on the flags.
   #
   # The `dart_analyze` aspect's staged project bounds the walk, and
-  # `e2e/analysis_failure`'s root analysis_options.yaml — deliberately left out
-  # of its `analysis_config` — carries an absurd `page_width: 20` canary so this
-  # job can prove it: `//:clean_lib` there is formatted at the stock 80, so if
-  # the walk ever escapes it reaches the canary and turns red. `e2e/analysis`
-  # runs its whole suite beside it, so its configured widths, `package:`
-  # includes and language versions must agree across all four cells too.
+  # `e2e/root_settings`' root analysis_options.yaml — deliberately left out of
+  # its `analysis_config` — carries an absurd `page_width: 20` canary so this
+  # job can prove it: `//analysis_canary:clean_lib` there is formatted at the
+  # stock 80, so if
+  # the walk ever escapes it reaches the canary and turns red. The analysis
+  # example in `e2e/examples` runs beside it, so its configured widths,
+  # `package:` includes and language versions must agree across all four cells
+  # too.
   format-hermeticity:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
+      # A path-mapped action runs only sandboxed, so the local cells turn off
+      # the path mapping e2e/examples' .bazelrc turns on.
       matrix:
         include:
           - name: forest runfiles, sandboxed
             flags: ""
           - name: forest runfiles, local
-            flags: "--spawn_strategy=standalone"
+            flags: "--spawn_strategy=standalone --experimental_output_paths=off"
           - name: manifest runfiles, sandboxed
             flags: "--noenable_runfiles"
           - name: manifest runfiles, local
-            flags: "--noenable_runfiles --spawn_strategy=standalone"
+            flags: "--noenable_runfiles --spawn_strategy=standalone --experimental_output_paths=off"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
       - name: analysis — ${{ matrix.name }}
-        working-directory: e2e/analysis
-        # Exit code 4: the workspace has no test targets, only the aspect's
+        working-directory: e2e/examples
+        # Exit code 4: the directory has no test targets, only the aspect's
         # checks, which `bazel test` builds.
-        run: bazel test ${{ matrix.flags }} --test_output=errors //... || [ $? -eq 4 ]
-      - name: analysis_failure canary — ${{ matrix.name }}
-        working-directory: e2e/analysis_failure
-        run: bazel test ${{ matrix.flags }} //:clean_lib || [ $? -eq 4 ]
+        run: bazel test ${{ matrix.flags }} --test_output=errors //analysis/... || [ $? -eq 4 ]
+      # The format check must take only what `dart format` reads, so editing a
+      # dependency cannot re-run it above. Read from the action graph, which a
+      # test cannot see.
+      - name: analysis — format check inputs, ${{ matrix.name }}
+        working-directory: e2e/examples
+        run: bazel run ${{ matrix.flags }} //analysis/format_inputs
+      # A body edit leaves a library's summary unchanged, so the library above
+      # it is not analyzed again: only the edited library's own summary and
+      # analysis run.
+      - name: analysis — a body edit re-analyzes only its own library, ${{ matrix.name }}
+        working-directory: e2e/examples
+        run: |
+          sed -i 's/  return a + b;/  final sum = a + b;\n  return sum;/' analysis/mylib/lib/mylib.dart
+          bazel test ${{ matrix.flags }} --explain=explain.txt //analysis/... || [ $? -eq 4 ]
+          git checkout analysis/mylib/lib/mylib.dart
+          grep -q "Analyzing Dart sources of //analysis/mylib:mylib" explain.txt
+          if grep -q "Analyzing Dart sources of //analysis:good_lib" explain.txt; then
+            echo "ERROR: //analysis:good_lib was analyzed again after a body edit in //analysis/mylib"
+            exit 1
+          fi
+          echo "OK: analysis cut off above the edited library"
+      - name: analysis canary — ${{ matrix.name }}
+        working-directory: e2e/root_settings
+        run: bazel test ${{ matrix.flags }} //analysis_canary:clean_lib || [ $? -eq 4 ]
   # The build-wide escape hatch: every dart_test compiled whole-program. Run
   # over the workspaces whose tests cover codegen, generated parts and the
   # package:test runner, so the path the flag falls back to cannot rot.
   whole-program:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       matrix:
-        folder: [".", "e2e/dart_test", "e2e/codegen"]
+        folder: [".", "e2e/examples"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
       - name: dart_test whole-program — ${{ matrix.folder }}
         working-directory: ${{ matrix.folder }}
-        run: bazel test --test_output=errors --@rules_dart//dart:modular_kernel=false //...
+        # In e2e/examples, the examples whose tests a compile mode changes.
+        run: |
+          targets=(//...)
+          [ "${{ matrix.folder }}" = e2e/examples ] && targets=(//tests/... //codegen/...)
+          bazel test --test_output=errors --@rules_dart//dart:modular_kernel=false "${targets[@]}"
+  # Analysis from source: every target analyzed by the SDK's own `dart
+  # analyze` against its dependencies' source, the path the summaries flag
+  # turns back to, so it cannot rot.
+  analysis-from-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        folder: [".", "e2e/examples"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: analysis from source — ${{ matrix.folder }}
+        working-directory: ${{ matrix.folder }}
+        # In e2e/examples, the analysis example, which has no test targets:
+        # exit code 4 passes there only.
+        run: |
+          if [ "${{ matrix.folder }}" = e2e/examples ]; then
+            bazel test --test_output=errors --@rules_dart//dart:analysis_summaries=false //analysis/... || [ $? -eq 4 ]
+          else
+            bazel test --test_output=errors --@rules_dart//dart:analysis_summaries=false //...
+          fi
+  # Without path mapping, which e2e/examples' .bazelrc turns on for its other
+  # tests: coverage as most builds collect it.
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: modular kernels
+            flags: ""
+          - name: whole program
+            flags: "--@rules_dart//dart:modular_kernel=false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: bazel coverage, combined LCOV report — ${{ matrix.name }}
+        working-directory: e2e/examples
+        run: |
+          bazel coverage --experimental_output_paths=off ${{ matrix.flags }} --combined_report=lcov //tests/package_test/coverage/...
+          bazel run --experimental_output_paths=off //tests/package_test/coverage/check -- "$(bazel info --experimental_output_paths=off output_path)/_coverage/_coverage_report.dat"
+  # The runner snapshot cache off, the default this repository's .bazelrc
+  # overrides: `runner_snapshot_cache_test` checks that the runner then starts
+  # from its kernel and no cache is touched.
+  runner-snapshot-off:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: dart_test without the runner snapshot cache
+        run: bazel test --test_output=errors --@rules_dart//dart:runner_snapshot=false //dart/private/tools:runner_snapshot_cache_test
+  # Bazel runs persistent workers in the exec root unless it sandboxes them, so
+  # a worker action that reads a file it never declared passes everywhere else
+  # here and fails only under remote or dynamic execution. Sandboxed, each
+  # worker sees only its declared inputs. Ubuntu's AppArmor refuses the
+  # unprivileged user namespaces the hardened sandbox needs, unless allowed.
+  worker-sandboxing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: [".", "e2e/examples"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: sandboxed workers — ${{ matrix.folder }}
+        working-directory: ${{ matrix.folder }}
+        # In e2e/examples, the examples whose actions run in workers.
+        run: |
+          targets=(//...)
+          [ "${{ matrix.folder }}" = e2e/examples ] && targets=(//analysis/... //codegen/...)
+          bazel test --test_output=errors --worker_sandboxing --experimental_worker_sandbox_hardening "${targets[@]}"
+  # MODULE.bazel's `bazel_compatibility` promises the oldest Bazel it names;
+  # this runs on that one. The lock files are written by .bazelversion's.
+  bazel-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      USE_BAZEL_VERSION: 9.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: [".", "e2e/smoke"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: Bazel ${{ env.USE_BAZEL_VERSION }} — ${{ matrix.folder }}
+        working-directory: ${{ matrix.folder }}
+        run: bazel test --lockfile_mode=off --test_output=errors //...
+  # Bazel's latest release candidate, weekly: an upstream change that breaks us
+  # shows before its release. A red run here never blocks a merge.
+  bazel-rc:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      USE_BAZEL_VERSION: last_rc
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: [".", "e2e/smoke"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: Bazel's latest release candidate — ${{ matrix.folder }}
+        working-directory: ${{ matrix.folder }}
+        run: bazel test --lockfile_mode=off --test_output=errors //...
   # Workspaces that are expected to fail at module resolution.
   # Validates that rules_dart produces the correct error messages.
   expected-failure:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: pub_lock_conflict — expect version conflict error
-        working-directory: e2e/pub_lock_conflict
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: pub_lock_conflict — expect raised root requests to fail under check_direct_dependencies = "error", naming each, and their commands to resolve them
+        working-directory: e2e/failures/pub_lock_conflict
         run: |
-          if bazel build //:app 2>/dev/null; then
-            echo "ERROR: build should have failed with a version conflict"
+          if out=$(bazel build //:app 2>&1); then
+            echo "ERROR: build should have failed: b's and older's locks are raised and the root makes that an error"
             exit 1
           fi
-          bazel build //:app 2>&1 | grep -q "conflicting versions across lock files"
-          echo "OK: expected conflict error detected"
+          echo "$out" | grep -q "newer than the root module asks for"
+          # A root lock raised by another root lock.
+          echo "$out" | grep -qF "1.9.0, from the lock \`//b:pubspec.lock\`"
+          echo "$out" | grep -qF "bazel run @rules_dart//dart/pub -- upgrade --directory=b path"
+          # A root lock raised by a dependency module's `pub.package()`.
+          echo "$out" | grep -qF "2.0.1, from the lock \`//older:pubspec.lock\`"
+          echo "$out" | grep -qF "2.0.2, from \`pub.package()\` in module \`dep_mod\`"
+          echo "$out" | grep -qF "bazel run @rules_dart//dart/pub -- upgrade --directory=older tuple"
+          # The commands the error gives run while the pub extension refuses
+          # the locks, and once they have, the build succeeds. Without a
+          # runfiles tree, as on Windows by default, they find the SDK through
+          # the manifest.
+          bazel run --noenable_runfiles --nobuild_runfile_links @rules_dart//dart/pub -- upgrade --directory=b path
+          bazel run --noenable_runfiles --nobuild_runfile_links @rules_dart//dart/pub -- upgrade --directory=older tuple
+          bazel build //:app
+          git checkout -- b/pubspec.lock older/pubspec.lock
+          echo "OK: expected conflicts detected; their commands resolve them"
+      - name: pub_highest_wins — expect the highest request to build, warning that the root's was raised
+        working-directory: e2e/root_settings
+        run: |
+          # The lock would replay the extension without running it, and the
+          # warning with it.
+          out=$(bazel build --lockfile_mode=off //... 2>&1) || { echo "$out"; exit 1; }
+          echo "$out" | grep -q "Package \"tuple\" is built at 2.0.2, newer than the root module asks for"
+          echo "$out" | grep -qF "2.0.1, from \`pub.package()\` in the root module"
+          echo "$out" | grep -qF "2.0.2, from the lock \`//:pubspec.lock\` in module \`mod_c\`"
+          # Raising a dependency's request says nothing.
+          if echo "$out" | grep -q "Package \"path\""; then
+            echo "ERROR: raising mod_b's request of path printed a message"
+            exit 1
+          fi
+          echo "OK: highest request built, the root's raised request reported"
+      - name: override_root_lock — expect a root lock above a dependency's pub.package() to build silently
+        working-directory: e2e/root_settings
+        run: |
+          # The lock would replay the extension without running it.
+          out=$(bazel build --lockfile_mode=off //pub_versions/override_root_lock/... 2>&1) || { echo "$out"; exit 1; }
+          # Raising a dependency's request says nothing, as in Bazel.
+          if echo "$out" | grep -q "Package \"path\""; then
+            echo "ERROR: raising dep_mod's request of path printed a message"
+            exit 1
+          fi
+          echo "OK: root lock built, nothing printed"
+      - name: toolchain_pin_conflict — expect a root pin below a dependency's request to fail, naming it
+        working-directory: e2e/failures/toolchain_pin_conflict
+        run: |
+          if out=$(bazel build @dart_toolchains//:all 2>&1); then
+            echo "ERROR: build should have failed: newer_dep requests a newer Dart SDK than the root pins"
+            exit 1
+          fi
+          echo "$out" | grep -q "newer_dep requests 99.0.0"
+          echo "$out" | grep -q "allow_upgrade_by_dependencies = True"
+          echo "OK: expected toolchain upgrade refusal detected"
+      - name: root_settings/pub_unsupplied — expect a dependency on an unsupplied sdk package to fail
+        working-directory: e2e/root_settings
+        run: |
+          if out=$(bazel build //pub_unsupplied:hosted_package_keeps_unsupplied_dependency 2>&1); then
+            echo "ERROR: build should have failed: xml depends on the sdk package petitparser"
+            exit 1
+          fi
+          echo "$out" | grep -q "nothing supplies \`petitparser\`"
+          echo "OK: expected unsupplied dependency detected"
+      - name: pub_lock_resolve_invalid — expect unnamed, twice-named and wrongly named packages, and path packages no lock can hold, to fail, naming each
+        working-directory: e2e/failures/pub_lock_resolve_invalid
+        run: |
+          if out=$(bazel build @pub//:path 2>&1); then
+            echo "ERROR: build should have failed: models named nowhere, utils twice, http not locked, path not a path package, far absolute, outside outside the workspace"
+            exit 1
+          fi
+          echo "$out" | grep -qF "it lists \`models\` as a \`path\` package"
+          echo "$out" | grep -qF "build_from_pubspec = [\"models\"]"
+          echo "$out" | grep -qF "\`resolve\` maps \`http\`, which the lock does not list"
+          echo "$out" | grep -qF "\`build_from_pubspec\` names \`path\`, which the lock does not list as \`path\`"
+          echo "$out" | grep -qF "\`utils\` is named in \`build_from_pubspec\` and \`ignored\`"
+          echo "$out" | grep -qF "\`build_from_pubspec\` names \`far\` (/opt/far), whose directory the lock gives by an absolute path"
+          echo "$out" | grep -qF "\`build_from_pubspec\` names \`outside\` (../outside), whose directory is outside the repository"
+          echo "OK: expected resolve errors detected"
+      - name: pub/path — expect a path package with a BUILD file of its own to be refused
+        working-directory: e2e/examples
+        run: |
+          if out=$(bazel build @refused//:has_build 2>&1); then
+            echo "ERROR: build should have refused has_build, which has a BUILD file"
+            exit 1
+          fi
+          echo "$out" | grep -qF 'has a Bazel build of its own (lib/BUILD.bazel)'
+          echo "OK: path package with a Bazel build refused"
+      # Every pub package is pinned and locked alike in every lock: a lock entry
+      # or a `pub.package()` without a digest, a git entry without a commit, or
+      # two locks disagreeing on a package fails, and one failure names each.
+      - name: pub_lock_refused — expect every unpinned package and every disagreement between locks to be refused in one failure
+        working-directory: e2e/failures/pub_lock_refused
+        run: |
+          if out=$(bazel build @one//:meta 2>&1); then
+            echo "ERROR: build should have refused path's and meta's missing sha256, foo's abbreviated resolved-ref, and the locks' disagreements on tuple, bar and baz"
+            exit 1
+          fi
+          echo "$out" | grep -qF 'No sha256 is pinned for pub package "path"'
+          echo "$out" | grep -qF 'https://pub.dev/api/packages/path/versions/1.9.1'
+          echo "$out" | grep -qF 'No sha256 is pinned for pub package "meta"'
+          echo "$out" | grep -qF 'resolved-ref "a1b2c3d", which is not a full commit id'
+          echo "$out" | grep -qF 'Package "tuple" 2.0.2 has conflicting sha256 digests'
+          echo "$out" | grep -qF 'Git package "bar" is locked differently across lock files'
+          echo "$out" | grep -qF 'Package "baz" is a git package in'
+          echo "OK: every refusal named in one failure"
+      - name: fixtures/pub_missing_dep — expect a pub.package() whose pubspec depends on an unsupplied package to be refused
+        working-directory: e2e/examples
+        run: |
+          if bazel build @provider//:provider 2>/dev/null; then
+            echo "ERROR: build should have refused provider's dependency on flutter"
+            exit 1
+          fi
+          bazel build @provider//:provider 2>&1 | grep -q "nothing supplies \`flutter\`"
+          echo "OK: unsupplied pub.package() dependency refused"
+      - name: fixtures/pub_cycle_refused — expect an undeclared cycle, a stale declaration, part of a cycle and a cycle through a resolve target to be refused
+        working-directory: e2e/examples
+        run: |
+          for target in left old_a tri_a theirs; do
+            if bazel build @refused_cycles//:$target 2>/dev/null; then
+              echo "ERROR: build should have refused $target's cycle"
+              exit 1
+            fi
+          done
+          bazel build @refused_cycles//:left 2>&1 | grep -qF 'pub.cycle(packages = ["left", "right"])'
+          bazel build @refused_cycles//:old_a 2>&1 | grep -qF "\`old_a\` is in no cycle"
+          bazel build @refused_cycles//:tri_a 2>&1 | grep -qF 'pub.cycle(packages = ["tri_a", "tri_b", "tri_c"])'
+          bazel build @refused_cycles//:theirs 2>&1 | grep -qF "move it from \`resolve\` to \`build_from_pubspec\`"
+          bazel build //fixtures/pub_cycle_refused/mine 2>&1 | grep -qF 'pub.cycle(packages = ["mine", "theirs"])'
+          echo "OK: undeclared and misdeclared cycles refused"
+      - name: kernel_source_refused — expect a dart_kernel_source naming both or neither of dart_version and path, or a path that is no checkout, to be refused
+        working-directory: e2e/examples
+        run: |
+          for repo in both neither not_a_checkout; do
+            if bazel build @$repo//:outline_tool 2>/dev/null; then
+              echo "ERROR: build should have refused @$repo"
+              exit 1
+            fi
+          done
+          bazel build @both//:outline_tool 2>&1 | grep -q "give exactly one of \`dart_version\` and \`path\`, both were given"
+          bazel build @neither//:outline_tool 2>&1 | grep -q "give exactly one of \`dart_version\` and \`path\`, neither was"
+          bazel build @not_a_checkout//:outline_tool 2>&1 | grep -q "/usr/pkg/kernel/pubspec.yaml does not exist"
+          echo "OK: dart_kernel_source misuse refused"
       # A link hook that refuses the program's recorded uses fails the build,
       # and its own message reaches the user.
-      - name: link_hook — expect a hook's refusal to fail the build, with its message
-        working-directory: e2e/link_hook
+      - name: native_hooks — expect a hook's refusal to fail the build, with its message
+        working-directory: e2e/examples
         run: |
-          if bazel build //:dynamic_app_assets 2>/dev/null; then
+          if bazel build //native_hooks:dynamic_app_assets 2>/dev/null; then
             echo "ERROR: build should have failed in glyphs' link hook"
             exit 1
           fi
-          bazel build //:dynamic_app_assets 2>&1 | grep -q "a Glyph is constructed at run time"
+          bazel build //native_hooks:dynamic_app_assets 2>&1 | grep -q "a Glyph is constructed at run time"
           echo "OK: link hook failure reported"
+      # A link hook runs against its package as Bazel declared it: a file of
+      # the package that no target lists is not there to import, even when the
+      # action runs where it is on disk. Running there is `no-sandbox`, which
+      # path mapping, on in this workspace, does not allow.
+      - name: native_hooks — expect a hook to find only its package's declared files
+        working-directory: e2e/examples
+        run: |
+          if bazel build --experimental_output_paths=off //native_hooks:undeclared_assets 2>/dev/null; then
+            echo "ERROR: build should have failed: the hook imports an undeclared file"
+            exit 1
+          fi
+          bazel build --experimental_output_paths=off //native_hooks:undeclared_assets 2>&1 | grep -q "package:undeclared_hook/extra.dart"
+          echo "OK: undeclared file not found by the hook"
+      # A link hook breaking a rule of what it may emit fails the build, naming
+      # what it did and what to change.
+      - name: native_hooks — expect each faulty output of a hook to fail the build, with what to change
+        working-directory: e2e/examples
+        run: |
+          expect() {
+            if bazel build "//native_hooks:$1" 2>/dev/null; then
+              echo "ERROR: //native_hooks:$1 should have failed"
+              exit 1
+            fi
+            bazel build "//native_hooks:$1" 2>&1 | grep -qF "$2"
+          }
+          expect faults_foreign "emitted \`package:glyphs/foreign.txt\`, a data asset of another package"
+          expect faults_twice "emitted \`package:faults/twice.txt\` more than once"
+          expect faults_escape "emitted \`package:faults/../escape.txt\`, whose name is not a relative path"
+          expect faults_unpromised "did not emit \`package:faults/promised.txt\`, which the \`link_hook_assets\` of \`@@//native_hooks/faults:pubspec-metadata\` promise"
+          expect faults_route "routed assets or metadata to the link hooks of glyphs"
+          expect faults_case "emitted \`package:faults/Case.txt\` and \`package:faults/case.txt\`, whose names differ only in case"
+          expect faults_prefix "emitted \`package:faults/dir\` and \`package:faults/dir/inner.txt\`: a name cannot be both a file and a directory of another"
+          expect trim_bad_assets "//native_hooks/trim_symbols:trim_symbols wrote \"trim_bad name\", which is not a symbol name. It writes one native symbol name per line."
+          expect pick_built_assets "emitted code asset \`package:pick/built\`, whose file"
+          expect pick_built_assets "is none of the code assets its package declares (\`package:pick/add\`, \`package:pick/mul\`). A link hook selects among those, and builds no native code: native code linked for each program is a \`dart_linked_code_asset\` in the \`linked_code_assets\` of \`@@//native_hooks/pick:pubspec-metadata\`"
+          expect pick_renamed_assets "emitted code asset \`package:pick/add\` as \`package:pick/renamed\`. A link hook keeps a code asset under the id its package declares"
+          expect pick_relinked_assets "emitted code asset \`package:pick/add\` with link mode \`dynamic_loading_process\`, but its package declares it with \`dynamic_loading_bundle\`"
+          echo "OK: faulty link-hook outputs reported"
+      # A VM program reaching web-only code, which `//...` skips, is refused
+      # by name, with the chain to the incompatible library.
+      - name: web/per_compiler — expect a VM program reaching web-only code to be refused
+        working-directory: e2e/examples
+        run: |
+          if bazel build //web/per_compiler/web_only:vm_reaching_web_only 2>/dev/null; then
+            echo "ERROR: build should have failed: //web/per_compiler/web_only:web_only is incompatible with the host"
+            exit 1
+          fi
+          bazel build //web/per_compiler/web_only:vm_reaching_web_only 2>&1 | grep -q "//web/per_compiler/web_only:web_only .*didn't satisfy constraint @@platforms//:incompatible"
+          echo "OK: incompatible web-only code reported"
       # A library importing a package only its dependency's dependency
       # provides fails every executable that reaches it, through the import
       # check's validation action, with no per-library compile involved.
       - name: analysis_failure — expect the layering check to fail a binary's build
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel build //import_check/user:layering_bin 2>/dev/null; then
+          if bazel build //fixtures/analysis_failure/import_check/user:layering_bin 2>/dev/null; then
             echo "ERROR: build should have failed the layering check"
             exit 1
           fi
-          bazel build //import_check/user:layering_bin 2>&1 | grep -q 'package "import_check_leaf" is not a direct dependency'
+          bazel build //fixtures/analysis_failure/import_check/user:layering_bin 2>&1 | grep -q 'package "import_check_leaf" is not a direct dependency'
           echo "OK: layering violation reported"
-      # Each target in e2e/analysis_failure is expected red under the
-      # `dart_analyze` aspect, which its `.bazelrc` applies under `bazel test`.
+      # Packages that import each other build only as one `dart_package_cycle`
+      # naming exactly their cycle. Two libraries depending on each other are
+      # Bazel's cycle error; one leaving out the dependency is told of
+      # `dart_package_cycle`; a cycle target whose members are no cycle, or
+      # only part of one, is refused, naming what to change.
+      - name: analysis_failure — expect undeclared, stale and partial package cycles to be refused
+        working-directory: e2e/examples
+        run: |
+          check() {
+            if bazel build "$1" 2>/dev/null; then
+              echo "ERROR: $1 should have been refused"
+              exit 1
+            fi
+            bazel build "$1" 2>&1 | grep -qF -- "$2"
+          }
+          check //fixtures/analysis_failure/import_check/cycle/mutual_a "cycle in dependency graph"
+          check //fixtures/analysis_failure/import_check/cycle/one_way_b "If package \"one_way_b\" imports this one in turn, the two are a dependency cycle: build them as one \`dart_package_cycle\`."
+          check //fixtures/analysis_failure/import_check/cycle:stale "\`stale_a\` and \`stale_b\` are in no cycle. Build each package as its own \`dart_library\`"
+          check //fixtures/analysis_failure/import_check/cycle:partial "\`part_b\` imports \`part_c\`, which no dependency provides: if it imports the members in turn, add it to \`members\`."
+          echo "OK: undeclared and misdeclared package cycles refused"
+      # Every import, export and part must be a `dart:` library, a `package:`
+      # URI a dependency provides, or a file the target holds. Each target
+      # below names a file another way, and the import check refuses it with
+      # the spelling to use; the last is a library nothing executable reaches,
+      # which checks itself.
+      - name: analysis_failure — expect the import check to refuse undeclared spellings
+        working-directory: e2e/examples
+        run: |
+          check() {
+            if bazel build "$1" 2>/dev/null; then
+              echo "ERROR: $1 should have failed the import check"
+              exit 1
+            fi
+            bazel build "$1" 2>&1 | grep -qF -- "$2"
+          }
+          check //fixtures/analysis_failure/import_check/spellings:relative_lib_test "Use 'package:import_check_spellings/x.dart' instead"
+          check //fixtures/analysis_failure/import_check/spellings:file_uri_bin "imports 'file:///tmp/undeclared.dart', a file: URI"
+          check //fixtures/analysis_failure/import_check/spellings:unheld_part "has the part 'unheld_part.g.dart'"
+          echo "OK: undeclared spellings refused"
+      # A library, and a test whose support library carries the edge, each
+      # listing a dependency none of its files imports.
+      - name: analysis_failure — expect the unused-dependency check to name the edge
+        working-directory: e2e/examples
+        run: |
+          check() {
+            if bazel build "$1" 2>/dev/null; then
+              echo "ERROR: $1 should have failed the unused-dependency check"
+              exit 1
+            fi
+            bazel build "$1" 2>&1 | grep -qF -- "$2"
+          }
+          check //fixtures/analysis_failure/import_check/unused:unused_lib "//fixtures/analysis_failure/import_check/unused:unused_lib: no file imports or exports these deps:"
+          check //fixtures/analysis_failure/import_check/unused:unused_lib "  //fixtures/analysis_failure/import_check/mid"
+          check //fixtures/analysis_failure/import_check/unused:unused_lib "  @rules_dart//dart/runfiles"
+          check //fixtures/analysis_failure/import_check/unused:unused_lib "bazel run @rules_dart//dart/unused_deps -- //fixtures/analysis_failure/import_check/unused:all removes them."
+          check //fixtures/analysis_failure/import_check/unused:unused_test "//fixtures/analysis_failure/import_check/unused:unused_test: no file imports or exports these deps:"
+          check //fixtures/analysis_failure/import_check/unused:unused_test "  //fixtures/analysis_failure/import_check/leaf"
+          check //fixtures/analysis_failure/import_check/unused:through_exempt "//fixtures/analysis_failure/import_check/unused:through_exempt: no file imports or exports these deps:"
+          check //fixtures/analysis_failure/import_check/unused:through_exempt "  //fixtures/analysis_failure/import_check/mid"
+          if bazel build //fixtures/analysis_failure/import_check/unused:through_exempt 2>&1 | grep -qF -- "  :leaf_plugin"; then
+            echo "ERROR: an exempt dependency was reported"
+            exit 1
+          fi
+          check //fixtures/analysis_failure/import_check/unused:bootstrapped "//fixtures/analysis_failure/import_check/unused:bootstrapped: no file imports or exports these deps:"
+          check //fixtures/analysis_failure/import_check/unused:bootstrapped "  //fixtures/analysis_failure/import_check/mid"
+          if bazel build //fixtures/analysis_failure/import_check/unused:bootstrapped 2>&1 | grep -qF -- "  //fixtures/analysis_failure/import_check/leaf"; then
+            echo "ERROR: a dependency the rule's bootstrap imports was reported"
+            exit 1
+          fi
+          echo "OK: unused dependencies reported"
+      # Each target in e2e/examples/fixtures/analysis_failure is expected red
+      # under the `dart_analyze` aspect, which `.bazelrc` applies under `bazel
+      # test`.
       # `check` builds one, expects the build to fail, and greps its output
       # for the one diagnostic only that target produces.
       - name: analysis_failure — expect analyzer diagnostics to fail the build, at workspace paths
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //:bad_lib 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure:bad_lib 2>/dev/null; then
             echo "ERROR: build should have failed with analyzer diagnostics"
             exit 1
           fi
-          out=$(bazel test //:bad_lib 2>&1 || true)
+          out=$(bazel test //fixtures/analysis_failure:bad_lib 2>&1 || true)
           echo "$out" | grep -q "unused_local_variable"
           # Named as the user's file, not as the staged copy under `src/`.
-          echo "$out" | grep -q -- "- lib/bad.dart:4:7 -"
+          echo "$out" | grep -q -- "- fixtures/analysis_failure/lib/bad.dart:4:7 -"
           echo "OK: expected analyzer failure detected, at the workspace path"
       - name: analysis_failure — expect a diagnostic's related location at its workspace path
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          out=$(bazel test //context 2>&1 || true)
+          out=$(bazel test //fixtures/analysis_failure/context 2>&1 || true)
           echo "$out" | grep -q "referenced_before_declaration"
-          echo "$out" | grep -q -- " - The declaration of 'x' is here at context/lib/context.dart:3:7"
+          echo "$out" | grep -q -- " - The declaration of 'x' is here at fixtures/analysis_failure/context/lib/context.dart:3:7"
           echo "OK: related location named at the workspace path"
       - name: analysis_failure — expect a binary's entrypoint to be analyzed too
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //:bad_bin 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure:bad_bin 2>/dev/null; then
             echo "ERROR: build should have failed with analyzer diagnostics"
             exit 1
           fi
-          bazel test //:bad_bin 2>&1 | grep -q "unused_import"
+          bazel test //fixtures/analysis_failure:bad_bin 2>&1 | grep -q "unused_import"
           echo "OK: expected analyzer failure detected"
-      # A `flutter_library` lists its files in `DefaultInfo` and leaves
-      # `DartAnalyzableInfo.srcs` empty; they are its own files all the same.
-      - name: analysis_failure — expect a flutter_library-shaped target to be analyzed
-        working-directory: e2e/analysis_failure
+      # Analysis against summaries refuses where the stock analyzer drops an
+      # error it reports from source: here a subtype of a dependency's `base`
+      # class. It fails with the analyzer's own error and the flag that turns
+      # summaries off; with the flag off, `dart analyze` reports the error.
+      - name: analysis_failure — expect analysis against summaries to fail loudly where the analyzer drops an error
+        working-directory: e2e/examples
         run: |
-          if bazel test //flutter_shaped 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/summaries/user 2>/dev/null; then
+            echo "ERROR: build should have failed: Sub is not base"
+            exit 1
+          fi
+          out=$(bazel test //fixtures/analysis_failure/summaries/user 2>&1 || true)
+          echo "$out" | grep -q "fixtures/analysis_failure/summaries/user/lib/user.dart:4:7: The type 'Sub' must be 'base', 'final' or 'sealed'"
+          echo "$out" | grep -q -- "--@rules_dart//dart:analysis_summaries=false"
+          out=$(bazel test --@rules_dart//dart:analysis_summaries=false //fixtures/analysis_failure/summaries/user 2>&1 || true)
+          echo "$out" | grep -q -- "- fixtures/analysis_failure/summaries/user/lib/user.dart:4:7 - The type 'Sub' must be 'base'"
+          echo "OK: dropped error refused against summaries, reported from source"
+      # A `flutter_library` lists its files in `DefaultInfo` and leaves
+      # `DartAnalyzableInfo.entry_srcs` empty; they are its own files all the same.
+      - name: analysis_failure — expect a flutter_library-shaped target to be analyzed
+        working-directory: e2e/examples
+        run: |
+          if bazel test //fixtures/analysis_failure/flutter_shaped 2>/dev/null; then
             echo "ERROR: build should have failed with unused_element"
             exit 1
           fi
-          bazel test //flutter_shaped 2>&1 | grep -q "unused_element"
+          bazel test //fixtures/analysis_failure/flutter_shaped 2>&1 | grep -q "unused_element"
           echo "OK: package-only target analyzed"
       - name: analysis_failure — expect a bundle-shaped target's package sources to be analyzed
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //bundle_shaped 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/bundle_shaped 2>/dev/null; then
             echo "ERROR: build should have failed with unused_element"
             exit 1
           fi
-          bazel test //bundle_shaped 2>&1 | grep -q "bundle_shaped/lib/bundle.dart.*unused_element"
+          bazel test //fixtures/analysis_failure/bundle_shaped 2>&1 | grep -q "fixtures/analysis_failure/bundle_shaped/lib/bundle.dart.*unused_element"
           echo "OK: package sources analyzed though DefaultInfo is a bundle"
       # Each file is judged by the nearest options file above it, as in the
       # IDE: `nested/lib/quiet.dart` breaks `nested/`'s `avoid_print`, and
       # `nested/lib/loud/loud.dart` prints under nearer options that allow it.
       - name: analysis_failure — expect the nearest options file to govern each file
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //nested 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/nested 2>/dev/null; then
             echo "ERROR: build should have failed with avoid_print"
             exit 1
           fi
-          out=$(bazel test //nested 2>&1 || true)
-          echo "$out" | grep -q "nested/lib/quiet.dart:5:3 .* avoid_print"
+          out=$(bazel test //fixtures/analysis_failure/nested 2>&1 || true)
+          echo "$out" | grep -q "fixtures/analysis_failure/nested/lib/quiet.dart:5:3 .* avoid_print"
           if echo "$out" | grep -q "loud.dart"; then
             echo "ERROR: loud.dart was judged by options other than its nearest"
             exit 1
@@ -216,55 +681,55 @@ jobs:
       # include is reported, and a working one really does bring its lints to
       # bear. Both are SDK behaviour that nothing else here asserts.
       - name: analysis_failure — expect an unresolvable ruleset include to fail
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //unresolved_ruleset:clean_lib 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/unresolved_ruleset:clean_lib 2>/dev/null; then
             echo "ERROR: build should have failed with an unresolved include"
             exit 1
           fi
-          bazel test //unresolved_ruleset:clean_lib 2>&1 | grep -q "include_file_not_found"
+          bazel test //fixtures/analysis_failure/unresolved_ruleset:clean_lib 2>&1 | grep -q "include_file_not_found"
           echo "OK: expected unresolved include detected"
       - name: analysis_failure — expect an included ruleset's lints to be applied
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //vga:double_quoted_lib 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/vga:double_quoted_lib 2>/dev/null; then
             echo "ERROR: build should have failed with a very_good_analysis lint"
             exit 1
           fi
-          bazel test //vga:double_quoted_lib 2>&1 | grep -q "prefer_single_quotes"
+          bazel test //fixtures/analysis_failure/vga:double_quoted_lib 2>&1 | grep -q "prefer_single_quotes"
           echo "OK: included ruleset's lints reached the code"
       # The layout-gated half: `public_member_api_docs` only fires when the
-      # nearest-pubspec walk roots the file's package at its true lib_root,
+      # nearest-pubspec walk roots the file's package at its true package_root,
       # which the per-package stub pubspecs staged by `stage_dart_project`
       # provide. If they go missing this build silently turns green.
       - name: analysis_failure — expect package-root-gated lints to be applied
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //vga:undocumented_lib 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/vga:undocumented_lib 2>/dev/null; then
             echo "ERROR: build should have failed with public_member_api_docs"
             exit 1
           fi
-          bazel test //vga:undocumented_lib 2>&1 | grep -q "public_member_api_docs"
+          bazel test //fixtures/analysis_failure/vga:undocumented_lib 2>&1 | grep -q "public_member_api_docs"
           echo "OK: package-root-gated lint reached the code"
       # A ruleset shared by another Bazel module is included from an options
       # file of this one; the module's own options file cannot govern here.
-      - name: analyze_composition — expect another module's ruleset to apply
-        working-directory: e2e/analyze_composition
+      - name: shared_lint_rules — expect another module's ruleset to apply
+        working-directory: e2e/examples
         run: |
-          if bazel test //bad 2>/dev/null; then
+          if bazel test //shared_lint_rules/bad 2>/dev/null; then
             echo "ERROR: build should have failed with avoid_print"
             exit 1
           fi
-          bazel test //bad 2>&1 | grep -q "avoid_print"
+          bazel test //shared_lint_rules/bad 2>&1 | grep -q "avoid_print"
           echo "OK: included ruleset from another module applied"
-      - name: analyze_composition — expect another repository's options to be refused
-        working-directory: e2e/analyze_composition
+      - name: shared_lint_rules — expect another repository's options to be refused
+        working-directory: e2e/examples
         run: |
-          if bazel build //:cross_repo_config 2>/dev/null; then
+          if bazel build //shared_lint_rules:cross_repo_config 2>/dev/null; then
             echo "ERROR: build should have refused an options file from another repository"
             exit 1
           fi
-          bazel build //:cross_repo_config 2>&1 | grep -q "is in another repository"
+          bazel build //shared_lint_rules:cross_repo_config 2>&1 | grep -q "is in another repository"
           echo "OK: cross-repository options refused"
       # The format check's red paths, under the aspect's `dart_format` output
       # group. The first is the obvious one; the other two exist because
@@ -275,22 +740,22 @@ jobs:
       # matches on. Each target is tagged `no-dart-analyze`, so the format check
       # is the only thing that can fail it.
       - name: analysis_failure — expect a formatting violation to fail
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //fmt 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/fmt 2>/dev/null; then
             echo "ERROR: build should have failed with a formatting violation"
             exit 1
           fi
-          bazel test //fmt 2>&1 | grep -q "Changed fmt/lib/misformatted.dart"
+          bazel test //fixtures/analysis_failure/fmt 2>&1 | grep -q "Not formatted: fixtures/analysis_failure/fmt/lib/misformatted.dart"
           echo "OK: expected formatting failure detected, at the workspace path"
       - name: analysis_failure — expect an unresolvable format ruleset to fail
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          if bazel test //fmt_unresolved 2>/dev/null; then
+          if bazel test //fixtures/analysis_failure/fmt_unresolved 2>/dev/null; then
             echo "ERROR: build should have failed with an unresolved include"
             exit 1
           fi
-          bazel test //fmt_unresolved 2>&1 | grep -q "Failed to resolve package URI"
+          bazel test //fixtures/analysis_failure/fmt_unresolved 2>&1 | grep -q "Failed to resolve package URI"
           echo "OK: silently-degraded format options rejected"
       # A relative `include:` of a yaml no target declares. The file exists in
       # the workspace, so a check that read outside its staged project — as an
@@ -298,19 +763,21 @@ jobs:
       # checks must fail on the unreadable include, naming it at its workspace
       # path, under the sandbox and without one alike.
       - name: analysis_failure — expect an undeclared relative include to fail both checks
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
+          # A path-mapped action runs only sandboxed, so both runs turn off the
+          # path mapping `.bazelrc` turns on.
           for strategy in "" "--spawn_strategy=standalone"; do
             for group in dart_analyze dart_format; do
-              flags="$strategy --output_groups=-dart_analyze,-dart_format,+$group"
-              if bazel test $flags //undeclared_include 2>/dev/null; then
+              flags=(${strategy:+"$strategy"} --experimental_output_paths=off "--output_groups=-dart_analyze,-dart_format,+$group")
+              if bazel test "${flags[@]}" //fixtures/analysis_failure/undeclared_include 2>/dev/null; then
                 echo "ERROR: $group [$strategy] should have failed on the undeclared include"
                 exit 1
               fi
-              out=$(bazel test $flags //undeclared_include 2>&1 || true)
+              out=$(bazel test "${flags[@]}" //fixtures/analysis_failure/undeclared_include 2>&1 || true)
               case $group in
-                dart_analyze) echo "$out" | grep -q "The URI 'shared.yaml' included in 'undeclared_include/analysis_options.yaml' can't be found" ;;
-                dart_format) echo "$out" | grep -q "Couldn't read file \"undeclared_include/shared.yaml\"" ;;
+                dart_analyze) echo "$out" | grep -q "The URI 'shared.yaml' included in 'fixtures/analysis_failure/undeclared_include/analysis_options.yaml' can't be found" ;;
+                dart_format) echo "$out" | grep -q "Couldn't read file \"fixtures/analysis_failure/undeclared_include/shared.yaml\"" ;;
               esac
             done
           done
@@ -319,61 +786,215 @@ jobs:
       # `dart_format` removed from the groups `.bazelrc` requests, the
       # misformatted target builds green.
       - name: analysis_failure — expect the format check to run only when requested
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
-          bazel test --output_groups=-dart_format //fmt || [ $? -eq 4 ]
+          bazel test --output_groups=-dart_format //fixtures/analysis_failure/fmt || [ $? -eq 4 ]
           echo "OK: format check skipped when its output group is not requested"
       # A `manual` target is out of `//...`'s reach; `dart_analysis_test` names
       # it and must fail to build on its violation, whatever output groups the
       # command line asks for.
       - name: analysis_failure — expect dart_analysis_test to fail on a manual target's violation
-        working-directory: e2e/analysis_failure
+        working-directory: e2e/examples
         run: |
           flags="--output_groups=-dart_analyze,-dart_format"
-          if bazel test $flags //manual:manual_analysis_test 2>/dev/null; then
+          if bazel test $flags //fixtures/analysis_failure/manual:manual_analysis_test 2>/dev/null; then
             echo "ERROR: build should have failed with dead_code"
             exit 1
           fi
-          bazel test $flags //manual:manual_analysis_test 2>&1 | grep -q "manual/lib/manual_bad.dart:4:3 - Dead code"
+          bazel test $flags //fixtures/analysis_failure/manual:manual_analysis_test 2>&1 | grep -q "fixtures/analysis_failure/manual/lib/manual_bad.dart:4:3 - Dead code"
           echo "OK: dart_analysis_test checked the manual target"
       # A hung test is diagnosed from what it printed before Bazel killed it, so
       # that output has to be in test.log rather than held back by the launcher.
       - name: dart_test — expect a timed-out test's output in its log
-        working-directory: e2e/dart_test
+        working-directory: e2e/examples
         run: |
-          if bazel test --test_timeout=5 //:hangs_until_killed_test; then
+          if bazel test --test_timeout=5 //tests:hangs_until_killed_test; then
             echo "ERROR: test should have timed out"
             exit 1
           fi
-          log=bazel-testlogs/hangs_until_killed_test/test.log
+          log=bazel-testlogs/tests/hangs_until_killed_test/test.log
           grep -q "Test timed out" "$log"
           grep -q "printed before hanging" "$log"
           grep -q "written to stderr before hanging" "$log"
           echo "OK: timed-out test's output reached its log"
+  # Hostile pub archives served from a file:// registry: nothing fetched may
+  # refer or write outside its package.
+  pub-archive-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1
+      - name: pub_archive_links — expect no fetched archive to reach outside its package
+        working-directory: e2e/failures/pub_archive_links
+        run: dart check.dart
+      - name: pub/git — expect host git config to reach only the fetch, by-id refusal included
+        working-directory: e2e/examples
+        run: dart pub/git/check_host_config.dart
   # `dart compile kernel` rejects `--enable-asserts`, so dbg-mode flags are
-  # chosen per compile mode. hello_world builds all four dart_binary modes;
-  # dart_test exercises the kernel test path end-to-end.
+  # chosen per compile mode. examples' hello_world builds all four dart_binary
+  # modes; dart_test exercises the kernel test path end-to-end.
   dbg-mode:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
       - name: hello_world — build all compile modes under -c dbg
-        working-directory: e2e/hello_world
-        run: bazel build -c dbg //...
+        working-directory: e2e/examples
+        run: bazel build -c dbg //hello_world/...
       - name: dart_test — run tests under -c dbg
-        working-directory: e2e/dart_test
-        run: bazel test -c dbg --test_output=errors //...
+        working-directory: e2e/examples
+        run: bazel test -c dbg --test_output=errors //tests/...
+  # The Gazelle plugin is a module of its own, and its golden-file tests live in
+  # the nested `dev/` module; `//...` in the root module reaches neither.
+  dev-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}
+          repository-cache: true
+      - run: bazel test --test_output=errors @rules_dart_gazelle_plugin//...
+      - name: BUILD files are as Gazelle writes them
+        run: bazel run @rules_dart_dev//:gazelle -- -mode=diff
+      # The test matrix builds and tests e2e/examples/gazelle's generated BUILD
+      # files.
+      - name: e2e/examples/gazelle's BUILD files are as the plugin writes them
+        working-directory: e2e/examples
+        run: bazel run //gazelle:gazelle -- -mode=diff gazelle
+  # A consuming module must be able to load every package of the published
+  # module: tools and IDE plugins enumerate `@rules_dart//...`. Development
+  # tooling loads repos a consumer never sees, so it lives in directories
+  # REPO.bazel keeps out of the module's packages.
+  consumer-query:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          repository-cache: true
+      - name: Query the whole published module from a consumer
+        working-directory: e2e/examples
+        run: bazel query "@rules_dart//..."
+  # `bazel run @rules_dart//dart/fix` and `@rules_dart//dart/format` write into
+  # the source tree, from a `bazel build` they run themselves, so no test can
+  # run them. Each check runs them over its workspace's fixtures and puts the
+  # fixtures back.
+  write-back:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          repository-cache: true
+      - name: fix — fix two targets in one run, format a 3.6 package
+        working-directory: e2e/examples
+        run: bazel run //fix/write_back
+      - name: shared_lint_rules — format under another module's ruleset
+        working-directory: e2e/examples
+        run: bazel run //shared_lint_rules/format_run
+  # Every workspace's MODULE.bazel.lock is complete without anyone's
+  # .bazelrc.user, the workspaces that fail on purpose included; so is every
+  # pubspec.lock outside e2e/; and the bazelrc preset is the one overhead
+  # generates.
+  lockfiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          repository-cache: true
+      - name: MODULE.bazel.lock files
+        run: bazel run @overhead//locks:check
+      - name: pubspec.lock files
+        run: bazel run //tool:pub_locks
+      - name: bazelrc preset
+        run: bazel run @overhead//preset -- --check
+  # The jobs below `conclusion` needs are every job that must pass, and some
+  # job runs in every workspace.
+  ci-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          repository-cache: true
+      - run: bazel run @overhead//ci:check
+  # Every hook in .pre-commit-config.yaml, with the prek overhead pins, as a
+  # commit runs them: one build puts overhead's tools in .bazel_env, then the
+  # hooks run them without Bazel.
   pre-commit:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The prek pinned in multitool.lock.json
-      - run: bazel run @multitool//tools/prek -- -C "$PWD" run --all-files --show-diff-on-failure
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          repository-cache: true
+      - run: bazel run --noincompatible_auto_exec_groups @overhead//:bazel_env -- update-symlink
+      - run: bazel run --noincompatible_auto_exec_groups @overhead//lint:prek -- run --all-files --show-diff-on-failure
   # For branch protection settings, this job provides a "stable" name that can be used to gate PR merges
-  # on "all matrix jobs were successful".
+  # on "all matrix jobs were successful". It needs every job but those with
+  # `continue-on-error`; `bazel run @overhead//ci:check` checks that it does.
   conclusion:
-    needs: [test, expected-failure, dbg-mode, pre-commit]
+    needs:
+      - test
+      - format-hermeticity
+      - whole-program
+      - analysis-from-source
+      - coverage
+      - runner-snapshot-off
+      - worker-sandboxing
+      - bazel-floor
+      - expected-failure
+      - pub-archive-links
+      - dbg-mode
+      - dev-tests
+      - consumer-query
+      - write-back
+      - lockfiles
+      - ci-config
+      - pre-commit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: always()
     steps:
       - name: Fail if any job did not succeed

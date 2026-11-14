@@ -1,0 +1,58 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_dart//dart:defs.bzl", "dart_library", "dart_package_metadata")
+load("//fix/tools:changes.bzl", "dart_changes")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "fix_suffixes",
+)
+
+# Pins the heuristic fixes cannot rely on. `dart fix` skips files called
+# `*.g.dart` and no other name, so a `.freezed.dart` part is rewritten like any
+# other source. Everything here is hand-written and therefore eligible, which
+# leaves the file name as the only variable.
+#
+# The violations are load-bearing, so do not run `@rules_dart//dart/fix` on
+# it: that would rewrite the fixture and take the assertion with it.
+dart_library(
+    name = "lib",
+    srcs = [
+        "lib/thing.dart",
+        "lib/thing.freezed.dart",
+        "lib/thing.g.dart",
+    ],
+    package = ":pubspec-metadata",
+    tags = ["no-dart-analyze"],
+)
+
+dart_changes(
+    name = "fixes",
+    output_group = "dart_fix_changes",
+    target = ":lib",
+)
+
+# The `--content` list is the whole assertion and it is exhaustive.
+run_binary(
+    name = "thing_fixed",
+    srcs = [":fixes"],
+    outs = ["thing_fixed.dart"],
+    args = [
+        "--changes",
+        "$(execpath :fixes)",
+        "--out",
+        "$(execpath thing_fixed.dart)",
+        "--content",
+        "fix/suffixes/lib/thing.freezed.dart",
+        "--path",
+        "fix/suffixes/lib/thing.freezed.dart",
+    ],
+    tool = "//fix/tools:check_changes",
+)
+
+diff_test(
+    name = "thing_fixed_test",
+    size = "small",
+    file1 = ":thing_fixed.dart",
+    file2 = "golden/thing.freezed.dart",
+)

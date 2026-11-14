@@ -1,5 +1,15 @@
 load("//dart:defs.bzl", "dart_binary", "dart_library", "dart_test")
 
+# Test fixtures: no API docs.
+# gazelle:map_kind bzl_library bzl_library @bazel_skylib//:bzl_library.bzl
+
+# `@rules_dart//dart/pub` compiles it in from source, built with no rule of
+# rules_dart's own (see `dart/pub/private/pub_runner.bzl`).
+exports_files(
+    ["lib/runfiles.dart"],
+    visibility = ["//dart/pub:__pkg__"],
+)
+
 dart_library(
     name = "runfiles",
     srcs = ["lib/runfiles.dart"],
@@ -15,10 +25,22 @@ dart_binary(
     deps = [":runfiles"],
 )
 
+# Run by runfiles_test under hand-built RUNFILES_DIR / RUNFILES_MANIFEST_FILE
+# environments; prints what rlocation returns for each argument.
+dart_binary(
+    name = "lookup_probe",
+    main = "test/lookup_probe.dart",
+    visibility = ["//dart/runfiles/test:__subpackages__"],
+    deps = [":runfiles"],
+)
+
 dart_test(
     name = "runfiles_test",
     size = "small",
-    data = [":create_probe"],
+    data = [
+        ":create_probe",
+        ":lookup_probe",
+    ],
     main = "test/runfiles_test.dart",
     deps = [
         ":runfiles",

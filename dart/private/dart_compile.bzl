@@ -3,6 +3,8 @@
 load("//dart/private:common.bzl", "PATH_MAPPING", "SDK_ENV")
 load("//dart/private:resources.bzl", "native_compile_resources")
 
+visibility("//dart/...")
+
 _DART_TOOLCHAIN = Label("//dart:toolchain_type")
 
 # The `dart compile` modes that tree-shake, and so can record the uses of
@@ -28,7 +30,7 @@ def compile_quiet_flags(compile_mode):
     Errors still print. The other modes have no flag that silences them.
 
     Args:
-        compile_mode: The Dart compile mode ("exe", "aot-snapshot", "kernel", "jit-snapshot").
+        compile_mode: The Dart compile mode ("exe", "aot-snapshot", "kernel").
 
     Returns:
         A list of flag strings.
@@ -42,7 +44,7 @@ def get_compilation_mode_flags(ctx, compile_mode):
 
     Args:
         ctx: The rule context (used to read ctx.var["COMPILATION_MODE"]).
-        compile_mode: The Dart compile mode ("exe", "aot-snapshot", "jit-snapshot").
+        compile_mode: The Dart compile mode ("exe", "aot-snapshot").
             A `kernel` is the front end's output itself and never reaches
             `dart compile`; it keeps its asserts, and the VM that runs it
             decides whether to enable them.
@@ -103,6 +105,49 @@ def front_end_flags(flags):
             pending = dests
     return front_end, rest
 
+def compile_kernel_file(ctx):
+    """Declares the kernel a target's `dart_compile_action` compiles.
+
+    It sits in a directory of the target's own, where the action puts the
+    empty package config that stops `dart compile`'s search for one.
+
+    Args:
+        ctx: The rule context.
+
+    Returns:
+        The declared `.dill` File.
+    """
+    return ctx.actions.declare_file("%s.compile/%s.app.dill" % (ctx.label.name, ctx.label.name))
+
+def _stage_script(ctx, main, sources):
+    # The script and the files it imports, linked into the target's own
+    # directory with their layout kept, so relative imports still resolve and
+    # the package config staged there is the one above them.
+    staged_main = None
+    staged = []
+    for f in sources.to_list():
+        path = "external/" + f.short_path[3:] if f.short_path.startswith("../") else f.short_path
+        link = ctx.actions.declare_file("%s.compile/%s" % (ctx.label.name, path))
+        ctx.actions.symlink(output = link, target_file = f)
+        staged.append(link)
+        if f == main:
+            staged_main = link
+    return staged_main, staged
+
+def _package_search_stop(ctx):
+    # `dart compile exe|aot-snapshot` walks up from its input to the nearest
+    # `.dart_tool/package_config.json`, and where it finds none but a
+    # `pubspec.yaml` runs `pub get` there and then that package's build
+    # hooks. An action without a sandbox would reach the workspace's own
+    # pubspec through the execroot. This empty config, in the directory of
+    # the target's own that holds the input, stops the walk; no package owns
+    # the input, so no hook runs.
+    config = ctx.actions.declare_file("%s.compile/.dart_tool/package_config.json" % ctx.label.name)
+    graph = ctx.actions.declare_file("%s.compile/.dart_tool/package_graph.json" % ctx.label.name)
+    ctx.actions.write(config, json.encode({"configVersion": 2, "packages": []}))
+    ctx.actions.write(graph, json.encode({"configVersion": 1, "packages": [], "roots": []}))
+    return [config, graph]
+
 def dart_compile_action(
         ctx,
         sdk,
@@ -111,29 +156,44 @@ def dart_compile_action(
         compile_mode = "exe",
         extra_flags = [],
         recorded_uses = None,
-        runner = None):
+        debug_info = None,
+        runner = None,
+        sources = None):
     """Creates the `dart compile` action that turns a kernel into the output.
 
     The kernel comes from `dart_kernel_action`, which has already run the front
     end, so nothing here resolves packages or folds constants: no
-    `--packages`, no `-D`.
+    `--packages`, no `-D`. Given `sources` instead, `dart compile` runs the
+    front end itself, on a script that imports only `dart:` libraries and
+    files beside it: a program built with no Dart tool of rules_dart's own.
 
     Args:
         ctx: The rule context.
         sdk: The target toolchain's `DartSdkInfo`. A cross toolchain's
             `target_os`/`target_arch` and `cross_tools` make it a cross compile.
-        kernel: The `.dill` File to compile.
+        kernel: The `.dill` File to compile, declared by `compile_kernel_file`,
+            or the entry point of `sources`.
         output: The output File to produce.
-        compile_mode: The compilation mode ("exe", "aot-snapshot", "jit-snapshot").
+        compile_mode: The compilation mode ("exe" or "aot-snapshot").
         extra_flags: Additional compiler flags (from dart_compile_flags attribute).
         recorded_uses: Optional output File for the uses of `@RecordUse`
             definitions the compiler records (`--recorded-uses`). Only the
             `exe` and `aot-snapshot` modes record.
+        debug_info: Optional output File for the debugging information the
+            compiler leaves out of the output (`--save-debugging-info`). Only
+            the `exe` and `aot-snapshot` modes have any.
         runner: Optional `compile_runner` kernel File to compile through. For a
             Mach-O `exe` or `aot-snapshot`, whose symbol table names the path
             gen_snapshot wrote the snapshot to: the runner picks that path and
             then removes it (see `compile_runner.dart`).
+        sources: Optional depset of the Dart files `kernel` is the entry
+            point of, when it is a script rather than a kernel.
     """
+    if sources != None:
+        kernel, staged = _stage_script(ctx, kernel, sources)
+        sources = depset(staged)
+    stop = _package_search_stop(ctx)
+
     args = ctx.actions.args()
     args.add("compile")
     args.add(compile_mode)
@@ -155,13 +215,17 @@ def dart_compile_action(
             fail("dart_compile_action: `dart compile %s` records no uses." % compile_mode)
         args.add(recorded_uses, format = "--recorded-uses=%s")
         outputs.append(recorded_uses)
+    if debug_info != None:
+        if compile_mode not in RECORDING_COMPILE_MODES:
+            fail("dart_compile_action: `dart compile %s` has no debugging information." % compile_mode)
+        args.add(debug_info, format = "--save-debugging-info=%s")
+        outputs.append(debug_info)
 
     # Per-target extra flags (last, so they can override defaults)
     args.add_all(extra_flags)
 
     # Through the runner, the command follows its own arguments, and the runner
-    # gives `-o` itself. Otherwise `-o` precedes the kernel: `jit-snapshot`
-    # hands everything after it to the training run.
+    # gives `-o` itself.
     if runner == None:
         args.add("-o", output)
     args.add(kernel)
@@ -173,13 +237,19 @@ def dart_compile_action(
         runner_args.add("--")
         runner_args.add(sdk.dart)
         arguments = [runner_args, args]
-        direct = [kernel, runner]
+        direct = [kernel, runner] + stop
     else:
         arguments = [args]
-        direct = [kernel]
+        direct = [kernel] + stop
 
     env = dict(SDK_ENV)
-    transitive = [sdk.tool_files]
+    transitive = [sdk.files.aot_compile]
+    if sources != None:
+        # The front end, its platforms and the `dart:` library list.
+        transitive += [sources, sdk.files.kernel]
+    if runner != None:
+        # The runner is a kernel, which `dart` runs in the VM.
+        transitive.append(sdk.files.run)
     if sdk.cross_tools != None and compile_mode in RECORDING_COMPILE_MODES:
         # The modes that take the target flags. dartdev reads only this cache
         # from the home it is given, so a read-only one serves.

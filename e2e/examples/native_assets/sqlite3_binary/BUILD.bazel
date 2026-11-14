@@ -1,0 +1,49 @@
+load(
+    "@rules_dart//dart:defs.bzl",
+    "dart_binary",
+    "dart_test",
+)
+load("@rules_dart//dart/ext/sqlite3:defs.bzl", "sqlite3_code_asset")
+
+# Exemplar of the dart_binary code_assets path (AOT): a plain package:sqlite3
+# program with the Bazel-built libsqlite3 bound as a code asset. No dart:ffi
+# in the source.
+dart_binary(
+    name = "app",
+    code_assets = [sqlite3_code_asset()],
+    # Compilation is split into the front end (`frontend_server`) + `dart compile`, and only
+    # the first stage runs the front end that resolves `-D`. The run test
+    # asserts this value reaches the binary, which it does not if the define
+    # is handed to the second stage — `dart compile` accepts it on a kernel
+    # input and silently drops it.
+    defines = ["BUILD_CHANNEL=bazel-e2e"],
+    main = "bin/main.dart",
+    deps = ["@pub_deps//:sqlite3"],
+)
+
+# Runs the compiled binary and asserts it resolves sqlite3 at runtime — the
+# acceptance for AOT native-asset resolution on each platform.
+dart_test(
+    name = "app_run_test",
+    size = "small",
+    data = [":app"],
+    main = "test/run_test.dart",
+    deps = [
+        "@pub_deps//:test",
+        "@rules_dart//dart/runfiles",
+    ],
+)
+
+# Exemplar of the dart_test code_assets path (test-time front end): a plain
+# package:sqlite3 program with no codegen, so it isolates code-asset .so
+# resolution (via absolute rlocation) from any source co-location concern.
+dart_test(
+    name = "direct_test",
+    size = "small",
+    code_assets = [sqlite3_code_asset()],
+    main = "test/direct_test.dart",
+    deps = [
+        "@pub_deps//:sqlite3",
+        "@pub_deps//:test",
+    ],
+)

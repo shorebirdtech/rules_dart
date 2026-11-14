@@ -1,0 +1,69 @@
+"""A package split across `dart_library` targets, one per directory of its `lib/`.
+
+The layout Gazelle generates. Every target names the package's one
+`dart_package_metadata`, so every record carries its language version,
+whichever comes first in `deps`.
+"""
+
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("//dart:defs.bzl", "dart_binary", "dart_package_metadata")
+load("//dart/tests:package_record_test.bzl", "app_record_probe", "declaration_conflict_test", "package_config_language_version_test")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "split_pkg",
+    language_version = "3.7",
+    visibility = ["//dart/tests/split_package_fixture:__subpackages__"],
+)
+
+dart_binary(
+    name = "app",
+    main = "main.dart",
+    deps = [
+        "//dart/tests/split_package_fixture/lib/plain",
+        "//dart/tests/split_package_fixture/lib/versioned",
+    ],
+)
+
+package_config_language_version_test(
+    name = "stated_version_reaches_package_config_test",
+    package_name = "split_pkg",
+    size = "small",
+    expected_language_version = "3.7",
+    target_under_test = ":app",
+)
+
+# A target that is itself the package, as a downstream app rule is, naming
+# the package's declaration.
+app_record_probe(
+    name = "declared_record",
+    package_name = "split_pkg",
+    expected_language_version = "3.7",
+    package = ":pubspec-metadata",
+    package_root = "dart/tests/split_package_fixture",
+    deps = [
+        "//dart/tests/split_package_fixture/lib/plain",
+        "//dart/tests/split_package_fixture/lib/versioned",
+    ],
+)
+
+build_test(
+    name = "app_record_takes_declared_version_test",
+    targets = [":declared_record"],
+)
+
+# Naming none, while its libraries name one, is an error naming both.
+app_record_probe(
+    name = "undeclared_record",
+    package_name = "split_pkg",
+    package_root = "dart/tests/split_package_fixture",
+    tags = ["manual"],
+    deps = ["//dart/tests/split_package_fixture/lib/versioned"],
+)
+
+declaration_conflict_test(
+    name = "app_record_conflict_test",
+    size = "small",
+    message = "  - none (package \"split_pkg\"), named by @@//dart/tests/split_package_fixture:undeclared_record\n  - @@//dart/tests/split_package_fixture:pubspec-metadata (package \"split_pkg\"), named by @@//dart/tests/split_package_fixture/lib/versioned:versioned\n",
+    target_under_test = ":undeclared_record",
+)

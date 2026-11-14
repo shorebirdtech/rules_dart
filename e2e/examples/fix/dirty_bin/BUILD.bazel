@@ -1,0 +1,66 @@
+load("@bazel_skylib//rules:diff_test.bzl", "diff_test")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_dart//dart:defs.bzl", "dart_binary", "dart_library", "dart_package_metadata")
+load("//fix/tools:changes.bzl", "dart_changes")
+
+dart_package_metadata(
+    name = "pubspec-metadata",
+    package_name = "fix_bin_dep",
+)
+
+# The entrypoint counterpart of //fix/dirty. A `dart_binary`'s `main` is under no
+# package's `lib/`, so it reaches the fixes through `DartAnalyzableInfo` rather
+# than through any `DartInfo` — and it is `is_source`, which is what makes it
+# write-back eligible once it is staged at all. Both halves have to hold: staged
+# but ineligible would compute the fix and drop it; eligible but unstaged would
+# never compute one.
+#
+# The violations are load-bearing: `bazel run //fix/write_back` fixes them and
+# puts them back.
+
+dart_library(
+    name = "dep",
+    srcs = ["lib/dep.dart"],
+    package = ":pubspec-metadata",
+    tags = ["no-dart-analyze"],
+)
+
+dart_binary(
+    name = "bin",
+    main = "main.dart",
+    tags = ["no-dart-analyze"],
+    deps = [":dep"],
+)
+
+dart_changes(
+    name = "fixes",
+    output_group = "dart_fix_changes",
+    target = ":bin",
+)
+
+# One file, and it is the entrypoint. `lib/dep.dart` has a violation too, but
+# it is `:dep`'s file, staged only to resolve against. The `--content` list is
+# exhaustive.
+run_binary(
+    name = "main_fixed",
+    srcs = [":fixes"],
+    outs = ["main_fixed.dart"],
+    args = [
+        "--changes",
+        "$(execpath :fixes)",
+        "--out",
+        "$(execpath main_fixed.dart)",
+        "--content",
+        "fix/dirty_bin/main.dart",
+        "--path",
+        "fix/dirty_bin/main.dart",
+    ],
+    tool = "//fix/tools:check_changes",
+)
+
+diff_test(
+    name = "main_fixed_test",
+    size = "small",
+    file1 = ":main_fixed.dart",
+    file2 = "golden/main.dart",
+)

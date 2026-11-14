@@ -1,0 +1,18 @@
+load("@rules_dart//dart:defs.bzl", "dart_binary")
+
+dart_binary(
+    name = "check",
+    main = "check.dart",
+    package = "//:pubspec-metadata",
+)
+
+dart_binary(
+    name = "release",
+    srcs = [
+        "format.dart",
+        "shared.dart",
+    ],
+    main = "release.dart",
+    package = "//:pubspec-metadata",
+    deps = ["//:scripts"],
+)

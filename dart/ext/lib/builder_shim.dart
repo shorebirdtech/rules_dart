@@ -20,8 +20,16 @@ import 'dart:isolate';
 import 'package:analyzer/dart/analysis/analysis_context_collection.dart';
 import 'package:analyzer/dart/analysis/results.dart';
 import 'package:analyzer/dart/analysis/session.dart';
+import 'package:analyzer/dart/analysis/utilities.dart';
 import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/element/element.dart';
+import 'package:analyzer/dart/sdk/build_sdk_summary.dart';
+import 'package:analyzer/error/error.dart' show DiagnosticType;
+import 'package:analyzer/file_system/file_system.dart' as fs;
+import 'package:analyzer/file_system/physical_file_system.dart';
+// ignore: implementation_imports
+import 'package:analyzer/src/dart/analysis/analysis_context_collection.dart'
+    show AnalysisContextCollectionImpl;
 import 'package:args/args.dart';
 import 'package:build/build.dart';
 import 'package:crypto/crypto.dart';
@@ -29,6 +37,10 @@ import 'package:glob/glob.dart';
 import 'package:logging/logging.dart';
 import 'package:package_config/package_config.dart';
 import 'package:path/path.dart' as p;
+import 'package:pub_semver/pub_semver.dart';
+import 'package:yaml/yaml.dart';
+
+import 'src/declared_file_system.dart';
 
 /// Parsed shim CLI arguments.
 class ShimArgs {
@@ -42,6 +54,7 @@ class ShimArgs {
     required this.rootLanguageVersion,
     this.packageConfigUri,
     this.sdkPath,
+    this.sdkSummaryPath,
   });
 
   final String inputPath;
@@ -67,6 +80,10 @@ class ShimArgs {
 
   /// Dart SDK root — AOT shims can't auto-detect this.
   final String? sdkPath;
+
+  /// The SDK's summary, written by [writeSdkSummary] of this same shim, read
+  /// in place of the SDK's sources at [sdkPath].
+  final String? sdkSummaryPath;
 
   final LanguageVersion rootLanguageVersion;
 
@@ -139,7 +156,16 @@ class ShimArgs {
             'containing `lib/_internal/libraries.dart`). Required when '
             "the shim runs as an AOT-compiled binary so the analyzer's "
             "context collection can locate the SDK's libraries. The "
-            "rules_dart codegen rules pass this from the toolchain.",
+            "rules_dart codegen rules pass this when a package adds "
+            "libraries to the SDK (`sky_engine`'s `_embedder.yaml`).",
+        defaultsTo: '',
+      )
+      ..addOption(
+        'sdk-summary',
+        help:
+            'Path to the summary of the Dart SDK that this shim wrote '
+            '(`sdk-summary`), which the analyzer reads in place of the '
+            "SDK's sources. Exclusive with `--sdk-path`.",
         defaultsTo: '',
       );
 
@@ -202,6 +228,12 @@ class ShimArgs {
     final configJson = parsed['config'] as String;
     final pkgConfig = parsed['package-config'] as String;
     final sdkPath = parsed['sdk-path'] as String;
+    final sdkSummary = parsed['sdk-summary'] as String;
+    if (sdkPath.isNotEmpty && sdkSummary.isNotEmpty) {
+      throw FormatException(
+        'Pass one of --sdk-path and --sdk-summary, not both.\n${parser.usage}',
+      );
+    }
     final rootLvParts = rootLvRaw.split('.');
     if (rootLvParts.length != 2) {
       throw FormatException(
@@ -252,6 +284,7 @@ class ShimArgs {
       config: config,
       packageConfigUri: pkgConfig.isEmpty ? null : pkgConfig,
       sdkPath: sdkPath.isEmpty ? null : sdkPath,
+      sdkSummaryPath: sdkSummary.isEmpty ? null : sdkSummary,
       rootLanguageVersion: rootLv,
     );
   }
@@ -281,12 +314,20 @@ typedef BuilderFactory = Builder Function(BuilderOptions options);
 ///
 /// Sets `exitCode` to 0 on success, 1 on builder failure, 2 on argument
 /// parsing failure.
+///
+/// [declaredInputs] is every file the action declared (a worker's
+/// `WorkRequest.inputs`), relative to the current directory or absolute.
+/// When given, the builder and its analyzer can see those files, the staging
+/// directory and the SDK, and nothing else. When null, as in a one-shot run
+/// where the sandbox already holds only the declared inputs, they see whole
+/// packages of the package config instead.
 Future<void> runShim(
   List<String> argv,
   Object factoryOrFactories, {
   Directory? stagingRoot,
   AnalysisContextBuilder? buildAnalysisContext,
   DiagnosticSink? writeDiagnostic,
+  Iterable<String>? declaredInputs,
 }) async {
   final sink = writeDiagnostic ?? _stderrSink;
   final ShimArgs args;
@@ -304,16 +345,13 @@ Future<void> runShim(
     );
     final originalCwd = Directory.current;
     try {
-      await prepareSourceGenCwd(
-        baseDir: stagingDir,
-        packageName: args.packageName,
-      );
       await _runWithStaging(
         absArgs,
         _normaliseFactories(factoryOrFactories),
         stagingDir,
         buildAnalysisContext: buildAnalysisContext,
         writeDiagnostic: sink,
+        declaredInputs: declaredInputs?.map(_absAndNormalize).toList(),
       );
     } finally {
       Directory.current = originalCwd;
@@ -347,11 +385,17 @@ List<BuilderFactory> _normaliseFactories(Object factoryOrFactories) {
   );
 }
 
-/// Writes a `pubspec.yaml` in [baseDir] and chdirs into it, so `source_gen`'s
-/// `rootPackageName` (a CWD-reading top-level `final`) initialises correctly
-/// before any Builder runs.
+/// Makes [baseDir] the package root a builder runs in, and chdirs into it.
 ///
-/// Also drops an empty `stacked.json` so `stacked_generator`'s
+/// The files below are stubs for a package that has none of its own: each is
+/// written only when the action staged no file at that path, so a target's own
+/// `pubspec.yaml` or `stacked.json` is the one builders read.
+///
+/// A `pubspec.yaml` makes [baseDir] a Dart package root for the analyzer, and
+/// lets `source_gen`'s `rootPackageName` (a CWD-reading top-level `final`)
+/// initialise before any Builder runs.
+///
+/// An empty `stacked.json` so `stacked_generator`'s
 /// `ConfigHelper.composeAndLoadConfigFile()` — invoked unconditionally
 /// by its dialog + bottomsheet generators via `getStackedAppFileName()`
 /// — finds the config file it hard-codes at CWD and loads its defaults
@@ -362,16 +406,81 @@ List<BuilderFactory> _normaliseFactories(Object factoryOrFactories) {
 Future<void> prepareSourceGenCwd({
   required Directory baseDir,
   required String packageName,
+  required LanguageVersion languageVersion,
 }) async {
   await baseDir.create(recursive: true);
-  await File(
-    p.join(baseDir.absolute.path, 'pubspec.yaml'),
-  ).writeAsString('name: $packageName\nenvironment:\n  sdk: ^3.0.0\n');
-  await File(
-    p.join(baseDir.absolute.path, 'stacked.json'),
-  ).writeAsString('{}\n');
+  Future<void> stub(String name, String content) async {
+    final file = File(p.join(baseDir.absolute.path, name));
+    if (!await file.exists()) await file.writeAsString(content);
+  }
+
+  await stub(
+    'pubspec.yaml',
+    'name: $packageName\nenvironment:\n'
+        '  sdk: ^${languageVersion.major}.${languageVersion.minor}.0\n',
+  );
+  await stub('stacked.json', '{}\n');
   Directory.current = baseDir;
 }
+
+/// Refuses a staged `pubspec.yaml` that contradicts the target it is staged
+/// for.
+///
+/// The codegen rules write each action a pubspec derived from the target's
+/// `package_name`, language version and `deps`, unless the target passes its
+/// own in `asset_deps`. The user's states the package's name and, through
+/// `environment.sdk`, its language version, which the target states too; two
+/// statements that disagree would leave builders reading one and the analyzer
+/// the other. The language version is read as pub reads it: the SDK
+/// constraint's lower bound, or 2.7 with none.
+void checkPubspecAgreement({
+  required String content,
+  required String shownAs,
+  required String packageName,
+  required LanguageVersion languageVersion,
+}) {
+  final fields = loadYaml(content, sourceUrl: Uri.file(shownAs));
+  final map = fields is Map ? fields : const <Object?, Object?>{};
+  final problems = <String>[];
+  final name = map['name'];
+  if (name != packageName) {
+    problems.add(
+      '${name == null ? 'no `name`' : '`name: $name`'}, but the target\'s '
+      '`package_name` is "$packageName"',
+    );
+  }
+  final environment = map['environment'];
+  final sdk = environment is Map ? environment['sdk'] : null;
+  final stated = sdk is String
+      ? _lowerBound(VersionConstraint.parse(sdk))
+      : null;
+  final pubspecVersion = stated == null
+      ? '2.7'
+      : '${stated.major}.${stated.minor}';
+  final targetVersion = '${languageVersion.major}.${languageVersion.minor}';
+  if (pubspecVersion != targetVersion) {
+    problems.add(
+      '${sdk is String ? '`environment.sdk: $sdk`' : 'no `environment.sdk`'}, '
+      'which is language version $pubspecVersion, but the target\'s '
+      'language version is $targetVersion (its `language_version` or '
+      '`package`, or the rules\' default when neither states one)',
+    );
+  }
+  if (problems.isEmpty) return;
+  throw StateError(
+    '$shownAs, passed in `asset_deps`, disagrees with the target:\n'
+    '${problems.map((m) => '  - it says $m').join('\n')}\n'
+    'State each fact once: make the pubspec agree, or drop it from '
+    '`asset_deps` and the rule writes one from the target.',
+  );
+}
+
+Version? _lowerBound(VersionConstraint constraint) => switch (constraint) {
+  Version v => v,
+  VersionRange r => r.min,
+  VersionUnion u => u.ranges.first.min,
+  _ => null,
+};
 
 /// Same as [runShim] but takes pre-parsed [args] and propagates errors as
 /// exceptions. Intended for unit tests.
@@ -386,10 +495,6 @@ Future<void> runShimWithArgs(ShimArgs args, Object factoryOrFactories) async {
   );
   final originalCwd = Directory.current;
   try {
-    await prepareSourceGenCwd(
-      baseDir: stagingDir,
-      packageName: args.packageName,
-    );
     await _runWithStaging(
       absArgs,
       _normaliseFactories(factoryOrFactories),
@@ -436,6 +541,9 @@ ShimArgs _absoluteArgs(ShimArgs a) => ShimArgs(
       ? _absAndNormalize(a.packageConfigUri!)
       : null,
   sdkPath: a.sdkPath != null ? _absAndNormalize(a.sdkPath!) : null,
+  sdkSummaryPath: a.sdkSummaryPath != null
+      ? _absAndNormalize(a.sdkSummaryPath!)
+      : null,
   rootLanguageVersion: a.rootLanguageVersion,
 );
 
@@ -453,19 +561,52 @@ String? extractShimFlag(List<String> argv, String flag) {
 }
 
 /// Signature of a function that returns an [AnalysisContextCollection]
-/// for the given inclusion + SDK settings. Tests can inject a stub; the
-/// shim's default is [_defaultBuildAnalysisContext].
+/// for the given inclusion + SDK settings: the SDK's summary when
+/// [sdkSummaryPath] is given, else its sources at [sdkPath]. Tests can inject
+/// a stub; the shim's default is [_defaultBuildAnalysisContext].
 typedef AnalysisContextBuilder =
     Future<AnalysisContextCollection> Function({
       required List<String> includedPaths,
-      required String? sdkPath,
+      required String sdkPath,
+      required String? sdkSummaryPath,
+      required fs.ResourceProvider resourceProvider,
     });
 
+// The public constructor takes no SDK summary; `build_resolvers` reads one
+// through the same `src/` API.
 Future<AnalysisContextCollection> _defaultBuildAnalysisContext({
   required List<String> includedPaths,
-  required String? sdkPath,
-}) async =>
-    AnalysisContextCollection(includedPaths: includedPaths, sdkPath: sdkPath);
+  required String sdkPath,
+  required String? sdkSummaryPath,
+  required fs.ResourceProvider resourceProvider,
+}) async => AnalysisContextCollectionImpl(
+  includedPaths: includedPaths,
+  sdkPath: sdkPath,
+  sdkSummaryPath: sdkSummaryPath,
+  // The SDK summary reaches the element model only through the summary
+  // store, which the analyzer makes only when given library summaries.
+  librarySummaryPaths: sdkSummaryPath != null ? const [] : null,
+  resourceProvider: resourceProvider,
+);
+
+/// Writes the summary of the Dart SDK at `--sdk` to `--out`: what
+/// `--sdk-summary` reads.
+///
+/// The analyzer has no format version in a summary and reads one written by
+/// another version of itself wrongly rather than refusing it, so a shim reads
+/// only a summary it wrote itself: the codegen rules have each generator
+/// write its own.
+Future<void> writeSdkSummary(List<String> argv) async {
+  final parser = ArgParser()
+    ..addOption('sdk', mandatory: true)
+    ..addOption('out', mandatory: true);
+  final parsed = parser.parse(argv);
+  final bytes = await buildSdkSummary(
+    resourceProvider: PhysicalResourceProvider.INSTANCE,
+    sdkPath: _absAndNormalize(parsed.option('sdk')!),
+  );
+  await File(parsed.option('out')!).writeAsBytes(bytes);
+}
 
 Future<void> _runWithStaging(
   ShimArgs args,
@@ -473,6 +614,7 @@ Future<void> _runWithStaging(
   Directory stagingDir, {
   AnalysisContextBuilder? buildAnalysisContext,
   DiagnosticSink writeDiagnostic = _stderrSink,
+  List<String>? declaredInputs,
 }) async {
   // Paths in [args] are pre-absolutised by _absoluteArgs so the chdir below
   // doesn't invalidate them.
@@ -491,16 +633,33 @@ Future<void> _runWithStaging(
     execByAsset.putIfAbsent(dep.asset, () => dep.exec);
   }
 
-  // Same-package deps land in the synthetic root; cross-package deps need
-  // a PackageConfig entry (currently unsupported).
+  // Same-package deps land in the synthetic root; other packages resolve
+  // through the package config built below.
+  //
+  // Staged by content, not `File.copy`: a copy keeps the source's mode, and
+  // Bazel outputs are read-only, which on Windows also blocks deleting the
+  // staging dir afterwards.
   final assetIdToPath = <AssetId, String>{};
   await Future.wait(
     execByAsset.entries.map((entry) async {
       final dest = stagedPath(p.context, stagingPath, entry.key);
       await Directory(p.dirname(dest)).create(recursive: true);
-      await File(entry.value).copy(dest);
+      await File(dest).writeAsBytes(await File(entry.value).readAsBytes());
       assetIdToPath[AssetId(args.packageName, entry.key)] = dest;
     }),
+  );
+  if (execByAsset['pubspec.yaml'] case final pubspec?) {
+    checkPubspecAgreement(
+      content: await File(pubspec).readAsString(),
+      shownAs: pubspec,
+      packageName: args.packageName,
+      languageVersion: args.rootLanguageVersion,
+    );
+  }
+  await prepareSourceGenCwd(
+    baseDir: stagingDir,
+    packageName: args.packageName,
+    languageVersion: args.rootLanguageVersion,
   );
   final inputId = AssetId(args.packageName, args.inputAssetPath);
 
@@ -516,26 +675,27 @@ Future<void> _runWithStaging(
   final pcFile = File(p.join(dartTool.path, 'package_config.json'));
   await pcFile.writeAsString(_serializePackageConfig(packageConfig));
 
-  // Write a minimal pubspec.yaml so the analyzer recognises the staging
-  // dir as a Dart package root. Also satisfies source_gen's
-  // `rootPackageName` (a top-level `final` in `source_gen/src/utils.dart`
-  // that reads `pubspec.yaml` from CWD) — the workerEntry pre-writes this
-  // file at startup via [prepareSourceGenCwd] so the cache is populated
-  // before any Builder observes it.
-  await File(
-    p.join(stagingPath, 'pubspec.yaml'),
-  ).writeAsString('name: ${args.packageName}\nenvironment:\n  sdk: ^3.0.0\n');
-
-  // Bound the analyzer's options discovery at the staging root. It finds
-  // `analysis_options.yaml` by walking up from the files it analyses, and this
-  // directory lives under the system temp dir — so without a file of its own,
-  // whichever stray options file happens to sit in a temp ancestor would
-  // silently configure codegen, differently on different machines. An empty
-  // options file is equivalent to no file at all when nothing above interferes,
-  // so this changes nothing except the ancestor read.
-  await File(
-    p.join(stagingPath, 'analysis_options.yaml'),
-  ).writeAsString('# rules_dart: bounds analysis_options.yaml discovery\n');
+  // What the builder and its analyzer may see: the staging dir, the SDK, and
+  // the action's declared inputs (or, without a list of them, whole packages
+  // of the package config). Nothing above the staging dir is visible, so the
+  // analyzer's walks up from it (options, pubspec, workspace markers) end
+  // there however the system temp dir is placed.
+  final sdkPath =
+      args.sdkPath ?? p.dirname(p.dirname(Platform.resolvedExecutable));
+  final sdkSummaryPath = args.sdkSummaryPath;
+  final provider = DeclaredResourceProvider(
+    PhysicalResourceProvider.INSTANCE,
+    roots: [
+      stagingPath,
+      sdkSummaryPath ?? sdkPath,
+      if (declaredInputs == null)
+        for (final pkg in packageConfig.packages) ...[
+          p.fromUri(pkg.root),
+          p.fromUri(pkg.packageUriRoot),
+        ],
+    ],
+    files: declaredInputs ?? const [],
+  );
 
   // Include ONLY the staging dir. Cross-package imports (`package:drift/...`,
   // `package:json_annotation/...`, …) are resolved through the
@@ -543,30 +703,37 @@ Future<void> _runWithStaging(
   // libraries lazily, but into the SAME AnalysisContext as the user's
   // code so their element models share one identity space.
   //
-  // Previously we listed every pub-cache package root in `includedPaths`.
-  // That produced one AnalysisContext per root, and a SEPARATE element
-  // model per context. Cross-context `asInstanceOf` calls then silently
-  // returned null — the visible symptom was drift_dev's
-  // `readTypeConverter` reporting `"Not a type converter"` on a
-  // `.map(const MyConverter())` expression whose static type resolved
+  // Listing every pub-cache package root in `includedPaths` would make one
+  // AnalysisContext per root, and a SEPARATE element model per context.
+  // Cross-context `asInstanceOf` calls then silently return null: drift_dev's
+  // `readTypeConverter` reports `"Not a type converter"` on a
+  // `.map(const MyConverter())` expression whose static type resolves
   // (from the staging context) to a `MyConverter` element whose
-  // `TypeConverter` supertype was NOT identical to the `TypeConverter`
-  // element drift loaded via `backend.readDart(drift2Uri)` (from the
+  // `TypeConverter` supertype is NOT identical to the `TypeConverter`
+  // element drift loads via `backend.readDart(drift2Uri)` (from the
   // drift pub-cache context). Forcing one context canonicalises them.
   final contextBuilder = buildAnalysisContext ?? _defaultBuildAnalysisContext;
   final collection = await contextBuilder(
     includedPaths: [stagingPath],
-    sdkPath: args.sdkPath != null ? p.absolute(args.sdkPath!) : null,
+    sdkPath: sdkPath,
+    sdkSummaryPath: sdkSummaryPath,
+    resourceProvider: provider,
   );
 
   // CWD must contain a valid pubspec before any Builder runs; the shim
   // entry pre-populates it via [prepareSourceGenCwd].
   final writer = _ShimAssetWriter();
-  final reader = _ShimAssetReader(assetIdToPath, packageConfig, writer);
+  final reader = _ShimAssetReader(
+    assetIdToPath,
+    packageConfig,
+    writer,
+    provider,
+  );
   final resolver = _ShimAnalyzerResolver(
     collection,
     assetIdToPath,
     packageConfig,
+    provider,
   );
   // One ResourceManager per shim invocation, shared by every pipeline
   // stage — mirrors build_runner, which shares one manager per build
@@ -609,6 +776,7 @@ Future<void> _runWithStaging(
     );
   });
   final lastIndex = builders.length - 1;
+  var buildSucceeded = false;
   try {
     // Set the level inside the try so the `finally` below always
     // restores it — even if anything between here and the `for` loop
@@ -637,15 +805,20 @@ Future<void> _runWithStaging(
         zoneValues: {#buildLog: logger},
       );
     }
+    buildSucceeded = true;
   } finally {
     // Drain any Resources a Builder held via `fetchResource` so they don't
     // leak across sequential worker requests. One disposeAll for the whole
     // pipeline — the manager is shared across stages. Disposal-phase log
     // records still flow to the listener because we cancel *after* disposal.
+    // A disposal failure fails the action. Both disposals always run; when
+    // the build already failed, that error is the one that propagates and the
+    // disposal failures are only reported.
+    final disposeFailures = <String>[];
     try {
       await resourceManager.disposeAll();
     } catch (e, st) {
-      writeDiagnostic('ResourceManager.disposeAll failed: $e\n$st');
+      disposeFailures.add('ResourceManager.disposeAll failed: $e\n$st');
     }
     await logSub.cancel();
     Logger.root.level = originalLevel;
@@ -654,16 +827,20 @@ Future<void> _runWithStaging(
     // across every request until it exhausts file descriptors.
     try {
       await collection.dispose();
-    } catch (_) {
-      // Older analyzer releases don't expose dispose; swallow so we don't
-      // regress workers on versions that lack it.
+    } catch (e, st) {
+      disposeFailures.add('AnalysisContextCollection.dispose failed: $e\n$st');
+    }
+    if (disposeFailures.isNotEmpty) {
+      if (buildSucceeded) throw StateError(disposeFailures.join('\n'));
+      disposeFailures.forEach(writeDiagnostic);
     }
   }
 
   // Route each builder-emitted asset to the declared Bazel output file
   // whose basename matches the same `input_stem + <extension>` pattern.
-  // Multi-output builders (e.g. a builder emitting both
-  // `.config.dart` and `.module.dart`) declare one `--output` per extension
+  // Multi-output builders (e.g. drift's analyzer, emitting both
+  // `.dart.drift_module.json` and `.dart.types.temp.dart`) declare one
+  // `--output` per extension
   // and the shim writes each emitted asset to the correct declared path.
   // For multi-stage pipelines we only care about the last (primary)
   // Builder's outputs; anything else is an intermediate from an earlier
@@ -680,11 +857,101 @@ Future<void> _runWithStaging(
     // No matching emission (the builder saw no relevant annotations):
     // write an empty file, since Bazel still requires the declared output.
     if (match != null) claimed.add(match);
-    await File(
-      outPath,
-    ).writeAsBytes(match != null ? emitted[match]! : const <int>[]);
+    await File(outPath).writeAsBytes(
+      match != null
+          ? _relativizeStagingUris(emitted[match]!, match, stagingDir)
+          : const <int>[],
+    );
   }
 }
+
+/// Rewrites every `import`, `export` and `part` URI in [bytes] that points
+/// into [stagingDir] to a path relative to [outputId], and fails if the
+/// staging dir is named anywhere else in the output.
+///
+/// A library outside `lib/` has no `package:` URI, so the analyzer gives it a
+/// `file:` URI under the staging dir, and generators that write a library's
+/// own URI into their output (stacked's router and locator) would emit the
+/// build's temporary path: code that does not compile, and different bytes on
+/// every run. The relative form is what a user would write, and is the same
+/// wherever the action runs. Any other mention of the staging dir has no
+/// correct rewrite, so it is an error rather than a silently uncacheable
+/// output.
+List<int> _relativizeStagingUris(
+  List<int> bytes,
+  AssetId outputId,
+  Directory stagingDir,
+) {
+  final roots = {
+    stagingDir.absolute.path,
+    stagingDir.resolveSymbolicLinksSync(),
+  };
+  final needles = {
+    for (final root in roots) ...[
+      root,
+      Uri.directory(root).toString().replaceFirst(RegExp(r'/$'), ''),
+    ],
+  };
+  bool mentionsStaging(String text) => needles.any(text.contains);
+
+  final String text;
+  try {
+    text = utf8.decode(bytes);
+  } on FormatException {
+    if (mentionsStaging(latin1.decode(bytes))) {
+      throw StateError(_stagingLeak(outputId));
+    }
+    return bytes;
+  }
+  if (!mentionsStaging(text)) return bytes;
+
+  String? relativize(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || !uri.isScheme('file')) return null;
+    final path = p.fromUri(uri);
+    for (final root in roots) {
+      if (!p.isWithin(root, path)) continue;
+      final asset = p.posix.joinAll(p.split(p.relative(path, from: root)));
+      return Uri(
+        path: p.posix.relative(asset, from: p.posix.dirname(outputId.path)),
+      ).toString();
+    }
+    return null;
+  }
+
+  final unit = parseString(content: text, throwIfDiagnostics: false).unit;
+  final uris = <StringLiteral>[
+    for (final directive in unit.directives)
+      ...switch (directive) {
+        NamespaceDirective(:final uri, :final configurations) => [
+          uri,
+          for (final c in configurations) c.uri,
+        ],
+        UriBasedDirective(:final uri) => [uri],
+        PartOfDirective(:final uri?) => [uri],
+        _ => const <StringLiteral>[],
+      },
+  ];
+  final edits = <(int, int, String)>[];
+  for (final literal in uris) {
+    final value = literal.stringValue;
+    final relative = value == null ? null : relativize(value);
+    if (relative != null) {
+      edits.add((literal.offset, literal.end, "'$relative'"));
+    }
+  }
+  var out = text;
+  for (final (start, end, replacement) in edits.reversed) {
+    out = out.replaceRange(start, end, replacement);
+  }
+  if (mentionsStaging(out)) throw StateError(_stagingLeak(outputId));
+  return utf8.encode(out);
+}
+
+String _stagingLeak(AssetId outputId) =>
+    '${outputId.path}: the generator wrote the build\'s temporary staging '
+    'path outside an import, export or part URI, so the output would not '
+    'compile elsewhere and would differ on every run.';
 
 /// Picks the emitted AssetId from [emitted] that corresponds to the
 /// declared Bazel output at [declaredPath], excluding any already-[claimed]
@@ -855,15 +1122,30 @@ String _serializePackageConfig(PackageConfig config) {
 // AssetReader implementation.
 // ---------------------------------------------------------------------------
 
-/// AssetReader backed by a Map<AssetId, file path> plus the shim's
+/// AssetReader backed by a `Map<AssetId, file path>` plus the shim's
 /// in-memory writer (so multi-stage pipelines can read prior stages'
 /// outputs via `findAssets`/`readAsString`).
 class _ShimAssetReader extends AssetReader {
-  _ShimAssetReader(this._assetIdToPath, this._packageConfig, this._writer);
+  _ShimAssetReader(
+    this._assetIdToPath,
+    this._packageConfig,
+    this._writer,
+    this._files,
+  );
 
   final Map<AssetId, String> _assetIdToPath;
   final PackageConfig _packageConfig;
   final _ShimAssetWriter _writer;
+
+  /// The files this action may read; see [DeclaredResourceProvider].
+  final fs.ResourceProvider _files;
+
+  fs.File? _fileFor(AssetId id) {
+    final path = _pathFor(id);
+    if (path == null) return null;
+    final file = _files.getFile(path);
+    return file.exists ? file : null;
+  }
 
   String? _pathFor(AssetId id) {
     final direct = _assetIdToPath[id];
@@ -883,33 +1165,21 @@ class _ShimAssetReader extends AssetReader {
   }
 
   @override
-  Future<bool> canRead(AssetId id) async {
-    if (_writer.assets.containsKey(id)) return true;
-    final path = _pathFor(id);
-    return path != null && await File(path).exists();
-  }
+  Future<bool> canRead(AssetId id) async =>
+      _writer.assets.containsKey(id) || _fileFor(id) != null;
 
   @override
   Future<List<int>> readAsBytes(AssetId id) async {
     final fromWriter = _writer.assets[id];
     if (fromWriter != null) return fromWriter;
-    final path = _pathFor(id);
-    if (path == null) throw AssetNotFoundException(id);
-    final f = File(path);
-    if (!await f.exists()) throw AssetNotFoundException(id);
-    return f.readAsBytes();
+    final file = _fileFor(id);
+    if (file == null) throw AssetNotFoundException(id);
+    return file.readAsBytesSync();
   }
 
   @override
-  Future<String> readAsString(AssetId id, {Encoding encoding = utf8}) async {
-    final fromWriter = _writer.assets[id];
-    if (fromWriter != null) return encoding.decode(fromWriter);
-    final path = _pathFor(id);
-    if (path == null) throw AssetNotFoundException(id);
-    final f = File(path);
-    if (!await f.exists()) throw AssetNotFoundException(id);
-    return f.readAsString(encoding: encoding);
-  }
+  Future<String> readAsString(AssetId id, {Encoding encoding = utf8}) async =>
+      encoding.decode(await readAsBytes(id));
 
   @override
   Stream<AssetId> findAssets(Glob glob) async* {
@@ -966,18 +1236,13 @@ class _ShimAssetWriter implements AssetWriter {
 class _ShimBuildStep implements BuildStep {
   _ShimBuildStep({
     required this.inputId,
-    required _ShimAssetReader reader,
-    required _ShimAssetWriter writer,
-    required _ShimAnalyzerResolver resolver,
+    required this._reader,
+    required this._writer,
+    required this._resolver,
     required Iterable<AssetId> allowedOutputsValue,
-    required PackageConfig packageConfig,
-    required ResourceManager resourceManager,
-  }) : _reader = reader,
-       _writer = writer,
-       _resolver = resolver,
-       _allowedOutputs = allowedOutputsValue,
-       _packageConfig = packageConfig,
-       _resourceManager = resourceManager;
+    required this._packageConfig,
+    required this._resourceManager,
+  }) : _allowedOutputs = allowedOutputsValue;
 
   @override
   final AssetId inputId;
@@ -1062,11 +1327,15 @@ class _ShimAnalyzerResolver implements Resolver {
     this._collection,
     this._assetIdToPath,
     this._packageConfig,
+    this._files,
   );
 
   final AnalysisContextCollection _collection;
   final Map<AssetId, String> _assetIdToPath;
   final PackageConfig _packageConfig;
+
+  /// The files this action may read; the analyzer sees the same view.
+  final fs.ResourceProvider _files;
 
   AnalysisSession _sessionFor(String filePath) {
     // All lookups use the single includedPath's context. Only staging is
@@ -1097,7 +1366,9 @@ class _ShimAnalyzerResolver implements Resolver {
   @override
   Future<bool> isLibrary(AssetId id) async {
     final path = _pathFor(id);
-    if (path == null) return false;
+    // The analyzer answers for a missing file with an empty library, so ask
+    // whether there is a file first, as build_runner's resolver does.
+    if (path == null || !_files.getFile(path).exists) return false;
     final result = await _sessionFor(path).getResolvedLibrary(path);
     return result is ResolvedLibraryResult;
   }
@@ -1115,6 +1386,12 @@ class _ShimAnalyzerResolver implements Resolver {
     final parsed = session.getParsedUnit(path);
     if (parsed is! ParsedUnitResult || parsed.isPart) {
       throw NonLibraryAssetException(id);
+    }
+    if (!allowSyntaxErrors) {
+      final library = session.getParsedLibrary(path);
+      if (library is ParsedLibraryResult) {
+        _refuseSyntaxErrors(id, library.units);
+      }
     }
     // For files under `lib/`, resolve by the canonical package: URI so the
     // returned LibraryElement is the same instance the analyzer hands to
@@ -1155,7 +1432,24 @@ class _ShimAnalyzerResolver implements Resolver {
     if (result is! ParsedUnitResult) {
       throw NonLibraryAssetException(id);
     }
+    if (!allowSyntaxErrors) _refuseSyntaxErrors(id, [result]);
     return result.unit;
+  }
+
+  /// Throws, as build_runner's resolver does, when any of [units] has a
+  /// syntax error: a builder reading it would run over a parse the analyzer
+  /// recovered from by guessing.
+  static void _refuseSyntaxErrors(AssetId id, List<ParsedUnitResult> units) {
+    final withErrors = [
+      for (final unit in units)
+        if (unit.diagnostics.any(
+          (d) => d.diagnosticCode.type == DiagnosticType.SYNTACTIC_ERROR,
+        ))
+          unit,
+    ];
+    if (withErrors.isNotEmpty) {
+      throw SyntaxErrorInAssetException(id, withErrors);
+    }
   }
 
   @override
@@ -1264,11 +1558,11 @@ class _ShimAnalyzerResolver implements Resolver {
       // can still carry `file://` URIs).
       final filePath = p.normalize(p.fromUri(uri));
       for (final pkg in _packageConfig.packages) {
-        final libRoot = p.normalize(p.fromUri(pkg.packageUriRoot));
+        final libDir = p.normalize(p.fromUri(pkg.packageUriRoot));
         final rootDir = p.normalize(p.fromUri(pkg.root));
-        if (p.isWithin(libRoot, filePath) || p.equals(libRoot, filePath)) {
+        if (p.isWithin(libDir, filePath) || p.equals(libDir, filePath)) {
           final rel = p.posix.joinAll(
-            p.split(p.relative(filePath, from: libRoot)),
+            p.split(p.relative(filePath, from: libDir)),
           );
           return AssetId(pkg.name, p.posix.join('lib', rel));
         }
