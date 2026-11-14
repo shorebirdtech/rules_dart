@@ -49,6 +49,12 @@ test:deep --test_tag_filters=
 # workspace runs with them on and the e2e workspaces with Bazel's default.
 common --incompatible_auto_exec_groups
 
+# Bazel 10's defaults, so the pinned Bazel tests the rules under them: a
+# Starlark flag reaches the exec configuration only with `scope = "universal"`,
+# and another repository's source file only if that repository exports it.
+common --incompatible_exclude_starlark_flags_from_exec_config
+common --incompatible_no_implicit_file_export
+
 # Load any settings specific to the current user.
 # .bazelrc.user should appear in .gitignore so that settings are not shared with team members
 # This needs to be last statement in this
