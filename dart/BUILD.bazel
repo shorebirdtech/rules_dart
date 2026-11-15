@@ -106,9 +106,13 @@ bool_flag(
 #   bazel test //... --@rules_dart//dart:outline_kernel=false
 # The outlines are made with the `pkg/kernel` of the SDK that compiled the
 # modules: the outline toolchain (`:outline_toolchain_type`) of the Dart SDK.
+# Its scope is `universal`: the outline tool is resolved in exec
+# configurations too, and with the flag off its SDK source must not be fetched
+# there either.
 bool_flag(
     name = "outline_kernel",
     build_setting_default = True,
+    scope = "universal",
     visibility = ["//visibility:public"],
 )
 
@@ -144,12 +148,16 @@ bool_flag(
 # "Analysis against summaries" says what it cannot do. Off, every target is
 # analyzed with its dependencies' source, by the SDK's own `dart analyze`:
 #   bazel test //... --@rules_dart//dart:analysis_summaries=false
-# It keeps Bazel's default scope, as `outline_kernel` does: the summary
-# analyzer is resolved in the exec configuration of the analysis actions, and
-# with the flag off its SDK source must not be fetched there either.
+# Its scope is `universal`, as `outline_kernel`'s is: the summary analyzer is
+# resolved in the exec configuration of the analysis actions, and with the
+# flag off its SDK source must not be fetched there either. It also carries the
+# analyzer toolchain's `False` into the analyzer's own exec tools
+# (`compile_runner`), whose libraries would otherwise declare summaries with
+# the analyzer itself.
 bool_flag(
     name = "analysis_summaries",
     build_setting_default = True,
+    scope = "universal",
     visibility = ["//visibility:public"],
 )
 
