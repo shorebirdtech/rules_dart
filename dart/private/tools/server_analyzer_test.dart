@@ -50,6 +50,7 @@ void main(List<String> args) {
       '.dart_tool/package_config.json':
           '{"configVersion":2,"packages":[{"name":"probe","rootUri":"../",'
           '"packageUri":"lib/","languageVersion":"3.10"}]}\n',
+      'fetched_packages.txt': '',
       ...files,
     }.entries) {
       File('${root.path}/$key')
@@ -105,6 +106,128 @@ void main(List<String> args) {
       expect(await analyze(server, dir), await dartAnalyze(dir));
     }
     expect(notes.where((n) => n.startsWith('Started')), hasLength(1));
+  });
+
+  group('a doc import it cannot resolve', () {
+    const options = 'linter:\n  rules:\n    - comment_references\n';
+    const library =
+        "/// @docImport 'package:absent/absent.dart';\nlibrary;\n\n"
+        "part 'b.dart';\n\n/// See [Absent].\nclass A {}\n";
+    const part = "part of 'a.dart';\n\n/// See [Absent].\nclass B {}\n";
+
+    test('fails nothing, nor do the references it might supply', () async {
+      final dir = project('doc', {
+        'analysis_options.yaml': options,
+        'lib/a.dart': library,
+        'lib/b.dart': part,
+      });
+      final cli = await dartAnalyze(dir);
+      expect(cli, (exitCode: 0, stdout: 'No issues found!'));
+      expect(await analyze(analyzer(), dir), cli);
+    });
+
+    Future<String> reportedIdentically(Map<String, String> files) async {
+      final dir = project('doc', {'analysis_options.yaml': options, ...files});
+      final cli = await dartAnalyze(dir);
+      expect(await analyze(analyzer(), dir), cli);
+      return cli.stdout;
+    }
+
+    test('is reported when it names a file of a fetched package', () async {
+      // A fetched package is all there, so the file is truly missing.
+      final out = await reportedIdentically({
+        'fetched_packages.txt': 'probe\n',
+        'lib/a.dart':
+            "/// @docImport 'package:probe/misspelt.dart';\nlibrary;\n",
+      });
+      expect(out, contains('uri_does_not_exist_in_doc_import'));
+    });
+
+    test('is not reported for a `dart:` library this SDK lacks, as which '
+        'exist depends on the platform', () async {
+      final out = await reportedIdentically({
+        'fetched_packages.txt': 'probe\n',
+        'lib/a.dart':
+            "/// @docImport 'dart:ui';\n"
+            "/// @docImport 'dart:ui_web';\nlibrary;\n",
+      });
+      expect(out, 'No issues found!');
+    });
+
+    test('is not reported for a package built here, which may be split '
+        'across targets this one cannot see', () async {
+      final out = await reportedIdentically({
+        'lib/a.dart': "/// @docImport 'package:probe/above.dart';\nlibrary;\n",
+      });
+      expect(out, 'No issues found!');
+    });
+
+    test('is an error when the fetched packages are not listed, as it cannot '
+        'then be told from one the target cannot see', () async {
+      final dir = project('doc', {
+        'lib/a.dart':
+            "/// @docImport 'package:probe/misspelt.dart';\nlibrary;\n",
+      });
+      File('$dir/fetched_packages.txt').deleteSync();
+      final names = throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          contains('fetched_packages.txt'),
+        ),
+      );
+      await expectLater(dartAnalyze(dir), names);
+      await expectLater(analyze(analyzer(), dir), names);
+    });
+
+    for (final (form, library, partOf) in const [
+      ('its name', 'library probe.a;', 'part of probe.a;'),
+      ('a package URI', 'library;', "part of 'package:probe/a.dart';"),
+    ]) {
+      test('covers a part that gives its library by $form', () async {
+        final out = await reportedIdentically({
+          'lib/a.dart':
+              "/// @docImport 'package:absent/absent.dart';\n$library\n\n"
+              "part 'b.dart';\n\n/// See [Absent].\nclass A {}\n",
+          'lib/b.dart':
+              '$partOf\n\n/// See [Absent] and [_Private].\nclass B {}\n',
+        });
+        // Only `_Private`, which no import can bring in.
+        expect('comment_references'.allMatches(out), hasLength(1));
+        expect(out, contains('b.dart:3:23'));
+      });
+    }
+
+    test('hides only the references it could supply', () async {
+      final out = await reportedIdentically({
+        'lib/a.dart':
+            "/// @docImport 'package:absent/a.dart' show Shown;\n"
+            "/// @docImport 'package:absent/b.dart' as b;\nlibrary;\n\n"
+            '/// See [Shown], [Shown.member], [b.Prefixed], [Unrelated] and '
+            '[Prefixed].\nclass A {}\n',
+      });
+      expect(out, contains('2 issues found.'));
+      expect(out, contains('a.dart:5:'));
+      expect('comment_references'.allMatches(out), hasLength(2));
+    });
+
+    test('leaves every other diagnostic reported', () async {
+      final dir = project('doc', {
+        'analysis_options.yaml': options,
+        'lib/a.dart': library,
+        'lib/b.dart': part,
+        'lib/c.dart': '/// See [Absent].\nclass C {}\n',
+      });
+      final cli = await dartAnalyze(dir);
+      expect(cli.exitCode, 1);
+      // As the platform writes the path `dart analyze` reports.
+      final lib = 'lib${Platform.pathSeparator}';
+      expect(cli.stdout, contains('${lib}c.dart:1:10'));
+      expect(cli.stdout, isNot(contains('${lib}a.dart')));
+      expect(cli.stdout, isNot(contains('${lib}b.dart')));
+      expect(cli.stdout, endsWith('1 issue found.'));
+      expect(await analyze(analyzer(), dir), cli);
+    });
   });
 
   test('answers again when its server dies during a request', () async {

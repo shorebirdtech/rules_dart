@@ -11,7 +11,7 @@ with and what they depend on:
     def _my_library_repo_impl(ctx):
         graph = dependency_graph(
             ctx.attr.package_name,
-            lambda p: read_pubspec_dependencies(ctx, "my_src__" + p),
+            lambda p: read_pubspec_dependencies(ctx, source_labels[p]),
             follow = known,
         )
         cycle = dependency_cycle(
@@ -38,7 +38,7 @@ a repository to wait on itself, and the library repository fetches only the
 source repositories building the package fetches anyway.
 """
 
-_PUBSPEC_DEPENDENCIES = "pubspec_dependencies.txt"
+PUBSPEC_DEPENDENCIES = "pubspec_dependencies.txt"
 
 def write_pubspec_dependencies(ctx, names):
     """Records, in a package's source repository, the names its pubspec depends on.
@@ -48,25 +48,24 @@ def write_pubspec_dependencies(ctx, names):
       names: The names under the package's pubspec `dependencies:`, as
         `read_pubspec` (`pubspec.bzl`) reads them.
     """
-    ctx.file(_PUBSPEC_DEPENDENCIES, "".join([n + "\n" for n in names]))
+    ctx.file(PUBSPEC_DEPENDENCIES, "".join([n + "\n" for n in names]))
 
-def read_pubspec_dependencies(ctx, repo):
-    """Reads what `write_pubspec_dependencies()` recorded in another repository.
+def read_pubspec_dependencies(ctx, source):
+    """Reads back what `write_pubspec_dependencies()` recorded in another repository.
 
-    The repository is read through its canonical name, not a label attribute:
-    Bazel fetches every repository a label attribute names before the rule
-    runs, and only the packages reached are wanted.
+    Naming a repository in an attribute does not fetch it, so a rule can be
+    given every package's source repository and read only those it reaches.
+    To keep that list off each of many repositories, one repository can hold it
+    (`str()` of each label is its canonical form) for the others to read.
 
     Args:
       ctx: The reading repository's `repository_ctx`.
-      repo: The source repository's name as the module extension that made
-        both gave it. The two must come from the same module extension.
+      source: A `Label` in the root package of the source repository.
 
     Returns:
       The recorded names, in order.
     """
-    sibling = "@@" + ctx.name[:len(ctx.name) - len(ctx.original_name)] + repo
-    return ctx.read(Label("{}//:{}".format(sibling, _PUBSPEC_DEPENDENCIES))).splitlines()
+    return ctx.read(source.same_package_label(PUBSPEC_DEPENDENCIES)).splitlines()
 
 def dependency_graph(package, dependencies, follow):
     """The packages `package` reaches, each with the names it depends on.
@@ -200,7 +199,7 @@ def cycle_declarations_error(groups, where, declare = "pub.cycle"):
         return None
     return "The dependency cycles declared by %s are not well formed:\n%s" % (where, "\n".join(problems))
 
-def _served_cycle_error(graph, package, cycle, served, declare):
+def _served_cycle_error(graph, package, cycle, served, declare, from_lock):
     # A package a target of the user's builds is that target, whose deps its
     # BUILD file states. Bazel builds no cycle, and no library holds both that
     # target and pub packages, so no declaration builds a cycle through it.
@@ -217,7 +216,7 @@ def _served_cycle_error(graph, package, cycle, served, declare):
     return ("Packages %s depend on each other: %s. %s Bazel builds no dependency cycle, " +
             "and a target of yours can't join one with pub packages. To build the cycle, build " +
             "%s as pub packages are built: move %s from `resolve` to `build_from_pubspec` on " +
-            "the `pub.from_lock()` that lists %s, depend on %s through that lock's hub, and " +
+            "the `%s()` that lists %s, depend on %s through that lock's hub, and " +
             "declare the cycle in the root module's MODULE.bazel:\n\n    %s\n\n" +
             "A `BUILD` file under %s `lib/` or `hook/` has to go, since the pub build " +
             "serves those directories.\n") % (
@@ -226,13 +225,14 @@ def _served_cycle_error(graph, package, cycle, served, declare):
         built,
         _names(mine),
         it,
+        from_lock,
         it,
         it,
         cycle_declaration(cycle, declare),
         its,
     )
 
-def cycle_error(graph, package, declared = [], advisory = [], declare = "pub.cycle", served = {}):
+def cycle_error(graph, package, declared = [], advisory = [], declare = "pub.cycle", served = {}, from_lock = "pub.from_lock"):
     """What is wrong with how `package`'s dependency cycle is declared, if anything.
 
     `dependency_cycle()` fails with this message; it is separate so that it can
@@ -245,13 +245,14 @@ def cycle_error(graph, package, declared = [], advisory = [], declare = "pub.cyc
       advisory: As for `dependency_cycle()`.
       declare: As for `dependency_cycle()`.
       served: As for `dependency_cycle()`.
+      from_lock: As for `dependency_cycle()`.
 
     Returns:
       The message, or None when the cycle may be planned.
     """
     cycle = _strongly_connected(graph, package)
     if len(cycle) > 1 and [p for p in cycle if p in served]:
-        return _served_cycle_error(graph, package, cycle, served, declare)
+        return _served_cycle_error(graph, package, cycle, served, declare, from_lock)
     for group in declared:
         if package not in group:
             continue
@@ -276,7 +277,7 @@ def cycle_error(graph, package, declared = [], advisory = [], declare = "pub.cyc
         cycle_declaration(cycle, declare),
     )
 
-def dependency_cycle(graph, package, declared = [], advisory = [], declare = "pub.cycle", served = {}):
+def dependency_cycle(graph, package, declared = [], advisory = [], declare = "pub.cycle", served = {}, from_lock = "pub.from_lock"):
     """The dependency cycle `package` is built in, and what the cycle depends on.
 
     Pub allows a cycle (`dio` and `dio_web_adapter` each depend on the other);
@@ -307,6 +308,8 @@ def dependency_cycle(graph, package, declared = [], advisory = [], declare = "pu
         it in place of a library (`pub.from_lock(resolve = ...)`), for the
         packages whose dependencies `graph` holds. No declaration builds a
         cycle through one.
+      from_lock: The tag that fetches a lock, as `<extension>.<tag>`, for the
+        message refusing a cycle through one of `served`.
 
     Returns:
       `struct(packages, owner, deps)`: `packages`, the sorted names of the
@@ -315,7 +318,7 @@ def dependency_cycle(graph, package, declared = [], advisory = [], declare = "pu
       repository builds the cycle; and `deps`, the sorted names the packages
       depend on outside the cycle.
     """
-    error = cycle_error(graph, package, declared, advisory, declare, served)
+    error = cycle_error(graph, package, declared, advisory, declare, served, from_lock)
     if error:
         fail(error)
     packages = _strongly_connected(graph, package)

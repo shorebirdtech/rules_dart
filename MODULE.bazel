@@ -11,7 +11,7 @@
 # in the same commit that introduces the incompatible change.
 module(
     name = "rules_dart",
-    bazel_compatibility = [">=9.0.0"],
+    bazel_compatibility = [">=9.3.0"],
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
@@ -75,6 +75,18 @@ filegroup(
     sha256 = "d7ab16bd3a5dab31b0de228a69ebbf241426e39cc2fb5e8e077b403e158bcf2b",
     strip_prefix = "pub-fe190660d68a4dd3070fe33fc406ff58d754dccc",
     urls = ["https://github.com/dart-lang/pub/archive/fe190660d68a4dd3070fe33fc406ff58d754dccc.tar.gz"],
+)
+
+# Dart packages in a repository other than the main one, for the test that
+# consumes them (//dart/tests/external_consumer_fixture), and declared as a
+# fetcher's repository declares them, for the tests of package identity: the
+# `fetched_*package_metadata` rules refuse the main repository.
+local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "local_repository")
+
+local_repository(
+    name = "fetched_fixtures",
+    dev_dependency = True,
+    path = "dart/tests/fetched_fixtures",
 )
 
 # On macOS, rules_cc leaves C++ to apple_support's toolchain. 2.9.0 builds that
@@ -155,20 +167,28 @@ local_path_override(
 )
 
 dart = use_extension("//dart:extensions.bzl", "dart")
-dart.toolchain(dart_version = "3.13.7")
+
+# The SDK rules_dart builds and tests with. Dev-only: as a dependency rules_dart
+# serves every SDK in `versions.bzl` and requests none.
+dart_dev = use_extension("//dart:extensions.bzl", "dart", dev_dependency = True)
+dart_dev.toolchain(dart_version = "3.14.1")
+
 use_repo(
     dart,
     # The pinned SDK's summary analyzer and outline stripper, for their own
     # tests.
     "dart_analyzer_source",
+    "dart_host_toolchains",
     "dart_kernel_source",
     "dart_toolchains",
-    # Each host's SDK, which compiles that host's pubspec reader.
-    "dart_linux-arm64",
-    "dart_linux-x64",
-    "dart_macos-arm64",
-    "dart_macos-x64",
-    "dart_windows-x64",
+    # rules_dart reads pubspecs with Dart's own package:yaml, compiled once per
+    # host (dart/pub/pubspec.bzl). Only the host's reader is fetched.
+    "pubspec_reader-linux-arm64",
+    "pubspec_reader-linux-x64",
+    "pubspec_reader-macos-arm64",
+    "pubspec_reader-macos-x64",
+    "pubspec_reader-windows-arm64",
+    "pubspec_reader-windows-x64",
 )
 
 # A Dart SDK source checkout on disk and the outline stripper and summary
@@ -180,22 +200,20 @@ kernel_checkout_files = use_repo_rule("//dart/tests:kernel_checkout.bzl", "kerne
 
 kernel_checkout_files(name = "kernel_checkout_files")
 
+# What a machine with no Dart SDK registers, for the test of its error.
+unsupported_host_toolchains = use_repo_rule("//dart/tests:unsupported_host_toolchains.bzl", "unsupported_host_toolchains")
+
+unsupported_host_toolchains(name = "unsupported_host_toolchains")
+
 kernel_checkout = use_extension("//dart/tests:kernel_checkout.bzl", "kernel_checkout", dev_dependency = True)
-use_repo(kernel_checkout, "analyzer_checkout_source", "analyzer_prefixed_source", "kernel_checkout_source", "kernel_prefixed_source")
+use_repo(kernel_checkout, "analyzer_checkout_source", "analyzer_prefixed_source", "analyzer_unserved_source", "kernel_checkout_source", "kernel_prefixed_source", "kernel_unserved_source")
 
 register_toolchains("@dart_toolchains//:all")
 
-# rules_dart reads pubspecs with Dart's own package:yaml, compiled once per host
-# (dart/pub/pubspec.bzl). Only the host's reader is fetched.
-pubspec_reader = use_extension("//dart/pub/private/pubspec_reader:extension.bzl", "pubspec_reader")
-use_repo(
-    pubspec_reader,
-    "pubspec_reader_linux-arm64",
-    "pubspec_reader_linux-x64",
-    "pubspec_reader_macos-arm64",
-    "pubspec_reader_macos-x64",
-    "pubspec_reader_windows-x64",
-)
+# What holds only on the machine Bazel runs on, tried last among the execution
+# platforms: a checkout's SDK, and the reason a build stops when no platform
+# has the Dart SDK it needs.
+register_toolchains("@dart_host_toolchains//:all")
 
 # The reader's results on hand-written pubspecs, for its test.
 pubspec_reader_cases = use_extension(

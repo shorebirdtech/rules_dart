@@ -17,6 +17,46 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.0.0"
+  from_path:
+    dependency: "direct main"
+    description:
+      name: from_path
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
+  from_path_git:
+    dependency: "direct main"
+    description:
+      path: "."
+      ref: main
+      resolved-ref: 0123456789abcdef0123456789abcdef01234567
+      url: "https://example.invalid/from_path_git.git"
+    source: git
+    version: "1.0.0"
+  from_outside:
+    dependency: "direct main"
+    description:
+      path: "/elsewhere/from_outside"
+      relative: false
+    source: path
+    version: "1.0.0"
+  registry:
+    dependency: "direct main"
+    description:
+      name: registry
+      sha256: "2222222222222222222222222222222222222222222222222222222222222222"
+      url: "https://private.example.com"
+    source: hosted
+    version: "2.0.0"
+  renamed:
+    dependency: "direct main"
+    description:
+      name: renamed
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
   tuple:
     dependency: "direct main"
     description:

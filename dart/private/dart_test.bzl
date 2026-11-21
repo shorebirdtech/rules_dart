@@ -30,7 +30,7 @@ load(
     "target_dart_abi",
 )
 load("//dart/private:dart_coverage.bzl", "COVERAGE_ATTRS", "test_coverage")
-load("//dart/private:dart_import_check.bzl", "dart_import_check_aspect", "import_check_output_groups")
+load("//dart/private:dart_import_check.bzl", "EXECUTABLE_SRCS_DOC", "dart_import_check_aspect", "import_check_output_groups")
 load(
     "//dart/private:dart_module.bzl",
     "MODULE_EXECUTABLE_ATTRS",
@@ -58,7 +58,6 @@ def _dart_test_impl(ctx):
     # The VM that runs the test: the target's, as everything the test runs is.
     dart_sdk_info = ctx.toolchains["//dart:toolchain_type"].dart_sdk_info
     workspace_name = ctx.workspace_name
-    sdk = ctx.attr._kernel_sdk[DartKernelSdkInfo]
 
     own = executable_package(ctx, [ctx.file.main] + ctx.files.srcs)
     packages = own.packages
@@ -96,12 +95,14 @@ def _dart_test_impl(ctx):
             main = main,
             packages = packages,
             output_dill = dill,
+            # Named by the SDK that compiles it, so the two cannot differ.
+            runtime = ctx.attr._program_kernel_sdk[DartKernelSdkInfo].module_runtime,
             defines = executable_defines(ctx),
             native_assets_yaml = native_assets_yaml,
             track_creation_locations = track_creation_locations(ctx),
         )
     else:
-        program_files = _link_modules(ctx, sdk, main, packages, own, native_assets_yaml, dill)
+        program_files = _link_modules(ctx, ctx.attr._kernel_sdk[DartKernelSdkInfo], main, packages, own, native_assets_yaml, dill)
 
     # Thin launcher: run the compiled program with asserts enabled. It carries
     # all sources/imports, so runfiles need only the VM, the kernels, the test
@@ -220,6 +221,7 @@ def _dart_test_impl(ctx):
             [ctx.file.main] + ctx.files.srcs,
             own.record,
             ctx.attr.deps,
+            main = ctx.file.main,
             # The bootstrap imports `package:test`, which `deps` must list.
             generated = [main],
         )),
@@ -472,7 +474,7 @@ dart_test = rule(
             allow_single_file = [".dart"],
         ),
         "srcs": attr.label_list(
-            doc = "Additional Dart source files that are part of this test's package but not reachable via `deps`.",
+            doc = EXECUTABLE_SRCS_DOC,
             allow_files = [".dart"],
         ),
         "deps": attr.label_list(

@@ -8,10 +8,16 @@
 // The tool builds the check's reports (the `dart_unused_deps` output group)
 // over the patterns, works out from `bazel query` which written labels they
 // mean and which BUILD file entry states them (`unused_deps_fix.dart`), and
-// has buildozer remove them from a copy of their BUILD files, which a real
-// run writes back. `--dry-run` prints the buildozer commands instead. A dep
+// has buildozer remove them from a copy of their BUILD files. buildozer
+// formats what it edits, so a file buildifier would change has only those
+// removals made to it (`build_file_edit.dart`). A real run writes the result
+// back; `--dry-run` prints it as a diff instead. A dep
 // buildozer cannot reach (one in a list variable or a comprehension) or that
-// the entry must keep is reported with its place, and the tool exits 1.
+// the entry must keep is reported with its place, as is a file of an
+// executable's srcs its main never loads, an import the import check refuses
+// (which holds back the entry's deps), and a BUILD file the removals cannot be
+// made in, which is left as it is while the others are fixed. Any of them makes
+// the tool exit 1.
 import 'dart:convert';
 import 'dart:io';
 
@@ -19,6 +25,7 @@ import 'package:runfiles/runfiles.dart';
 
 import 'apply_args.dart';
 import 'build_events.dart';
+import 'build_file_edit.dart';
 import 'unused_deps_fix.dart';
 
 const _name = 'unused_deps';
@@ -104,7 +111,7 @@ class _Fixer {
         'repository.',
       );
     }
-    if (reports.every((r) => r.unused.isEmpty)) {
+    if (reports.every((r) => r.isClean)) {
       stdout.writeln('$_name: no unused deps');
       return 0;
     }
@@ -115,7 +122,7 @@ class _Fixer {
     String canonical(String label) => canonicalLabel(label, mapping);
     final packages = {
       for (final r in reports)
-        if (r.unused.isNotEmpty) r.label.substring(0, r.label.indexOf(':')),
+        if (!r.isClean) r.label.substring(0, r.label.indexOf(':')),
     };
     final rules = await _rules(packages);
 
@@ -123,9 +130,7 @@ class _Fixer {
     final reported = {for (final r in reports) r.label};
     final entries = {
       for (final r in rules)
-        if (reports.any(
-          (p) => p.unused.isNotEmpty && p.label == canonical(r.label),
-        ))
+        if (reports.any((p) => !p.isClean && p.label == canonical(r.label)))
           r.entry,
     };
     final siblings = [
@@ -149,7 +154,8 @@ class _Fixer {
     }, canonical);
     // buildozer edits a copy of the BUILD files, one dep at a time, and its
     // exit codes say which removals it makes. A dry run stops there; a real
-    // run writes the copies it edited back, so both report the same.
+    // run writes the copies it edited back, so both report the same. A file
+    // that cannot be edited is reported, and costs the others nothing.
     final removals = findRemovals(
       reports: reports,
       rules: rules,
@@ -162,15 +168,27 @@ class _Fixer {
       buildozer: buildozer,
       packages: {for (final e in removals.remove.keys) _package(e)},
     );
-    final made = await editEach(removals, rules, mirror.remove);
+    final edited = await editEach(
+      removals.only((e) => !mirror.failures.containsKey(_package(e))),
+      rules,
+      mirror.remove,
+    );
+    final results = await mirror.results({
+      for (final e in edited.remove.keys) _package(e),
+    });
+    final made = edited.only((e) => results.containsKey(_package(e)));
 
     if (args.dryRun) {
-      made.commands.forEach(stdout.writeln);
-      return _reportKept(made.kept);
+      results.forEach((package, after) {
+        final path = mirror.files[package]!;
+        final before = File('$workspace/$path').readAsStringSync();
+        stdout.write(unifiedDiff(path, before, after));
+      });
+      return _reportLeft(made, made.kept, mirror);
     }
     final left = <Kept>[];
     if (made.remove.isNotEmpty) {
-      mirror.writeBack({for (final e in made.remove.keys) _package(e)});
+      mirror.writeBack(results);
       left.addAll(stillListed(made, await _rules(packages)));
     }
     final count = made.remove.values.fold(0, (n, deps) => n + deps.length);
@@ -178,12 +196,19 @@ class _Fixer {
       '$_name: removed $count deps from ${made.remove.length} BUILD file '
       'entries',
     );
-    return _reportKept([...made.kept, ...left]);
+    return _reportLeft(made, [...made.kept, ...left], mirror);
   }
 
-  int _reportKept(List<Kept> kept) {
-    kept.forEach(stderr.writeln);
-    return kept.isEmpty ? 0 : 1;
+  /// Prints what the fixer leaves to the user, failing when there is any.
+  int _reportLeft(Removals made, List<Kept> kept, _Mirror mirror) {
+    final left = [
+      ...made.refused,
+      ...made.unreached,
+      ...kept,
+      for (final failure in mirror.failures.values) '$_name: $failure',
+    ];
+    left.forEach(stderr.writeln);
+    return left.isEmpty ? 0 : 1;
   }
 
   /// The reports the build makes of the caller's targets, and of [targets],
@@ -208,7 +233,11 @@ class _Fixer {
     );
     final built = await build.exitCode;
     if (built != 0) {
-      throw _Failure('the build failed, so nothing was removed', built);
+      throw _Failure(
+        '`bazel build` exited $built (${_exitMeaning[built] ?? 'see its '
+                'output above'}), so nothing was removed',
+        built,
+      );
     }
     final (:configured, :files) = groupFiles(events, args.group);
     if (configured == 0) {
@@ -289,9 +318,11 @@ String _package(String label) => label.substring(2, label.indexOf(':'));
 /// A copy of some packages' BUILD files, which buildozer edits in place of
 /// the workspace's. buildozer formats each file it edits, so the copies are
 /// formatted first: then a command that removes nothing changes nothing,
-/// and its exit code says so.
+/// and its exit code says so. What goes back to the workspace is the file as
+/// it was with only the removals made, so its formatting stays its own. A file
+/// this cannot be done for goes in [failures], and the others carry on.
 class _Mirror {
-  _Mirror._(this.root, this.workspace, this.buildozer, this.files);
+  _Mirror._(this.root, this.workspace, this.buildozer);
 
   static Future<_Mirror> create(
     String root, {
@@ -299,27 +330,15 @@ class _Mirror {
     required String buildozer,
     required Set<String> packages,
   }) async {
-    final files = <String, String>{};
-    for (final package in packages) {
-      // The file Bazel and buildozer read, BUILD.bazel before BUILD.
-      final dir = package.isEmpty ? workspace : '$workspace/$package';
-      final name = ['BUILD.bazel', 'BUILD'].firstWhere(
-        (n) => File('$dir/$n').existsSync(),
-        orElse: () => throw _Failure('no BUILD file in $dir'),
-      );
-      final path = package.isEmpty ? name : '$package/$name';
-      files[package] = path;
-      File('$workspace/$path')
-          .copySync((File('$root/$path')..createSync(recursive: true)).path);
-    }
+    final mirror = _Mirror._(root, workspace, buildozer);
     // Where buildozer finds the root of the labels it is given.
     File('$root/MODULE.bazel').createSync(recursive: true);
-    final mirror = _Mirror._(root, workspace, buildozer, files);
-    if (packages.isNotEmpty) {
-      await mirror._run(
-        ['format', for (final p in packages) '//$p:__pkg__'],
-        {0, 3},
-      );
+    for (final package in packages) {
+      try {
+        await mirror._add(package);
+      } on _Failure catch (e) {
+        mirror.failures[package] = e.message;
+      }
     }
     return mirror;
   }
@@ -329,26 +348,104 @@ class _Mirror {
   final String buildozer;
 
   /// Each package's BUILD file, by workspace path.
-  final Map<String, String> files;
+  final files = <String, String>{};
 
-  /// Removes [dep] from [entry] in the copy, answering buildozer's exit code.
-  Future<int> remove(String entry, String dep) =>
-      _run(['remove deps $dep', entry], {0, 2, 3});
+  /// Why each package's BUILD file cannot be edited.
+  final failures = <String, String>{};
 
-  /// Copies the BUILD files of [packages] back into the workspace.
-  void writeBack(Set<String> packages) {
-    for (final package in packages) {
-      final path = files[package]!;
-      File('$workspace/$path')
-          .writeAsBytesSync(File('$root/$path').readAsBytesSync());
-    }
+  /// Each package's BUILD file as formatted, before any edit.
+  final _formatted = <String, String>{};
+
+  /// Copies [package]'s BUILD file and formats the copy.
+  Future<void> _add(String package) async {
+    // The file Bazel and buildozer read, BUILD.bazel before BUILD.
+    final dir = package.isEmpty ? workspace : '$workspace/$package';
+    final name = ['BUILD.bazel', 'BUILD'].firstWhere(
+      (n) => File('$dir/$n').existsSync(),
+      orElse: () => throw _Failure('no BUILD file in $dir'),
+    );
+    final path = package.isEmpty ? name : '$package/$name';
+    files[package] = path;
+    File('$workspace/$path')
+        .copySync((File('$root/$path')..createSync(recursive: true)).path);
+    await _run(['format', '//$package:__pkg__'], {0, 3});
+    _formatted[package] = File('$root/$path').readAsStringSync();
   }
 
-  Future<int> _run(List<String> arguments, Set<int> expected) async {
+  /// Removes [dep] from [entry] in the copy, answering buildozer's exit code
+  /// and what it printed.
+  Future<({int code, String output})> remove(String entry, String dep) async {
+    final result = await _run(['remove deps $dep', entry], {0, 2, 3});
+    return (code: result.exitCode, output: '${result.stdout}${result.stderr}');
+  }
+
+  /// What the BUILD file of each of [packages] becomes, for those that can
+  /// have their removals made.
+  Future<Map<String, String>> results(Set<String> packages) async {
+    final results = <String, String>{};
+    for (final package in packages) {
+      try {
+        results[package] = await _result(package);
+      } on _Failure catch (e) {
+        failures[package] = e.message;
+      }
+    }
+    return results;
+  }
+
+  /// Writes [results], by package, into the workspace.
+  void writeBack(Map<String, String> results) {
+    results.forEach((package, text) {
+      File('$workspace/${files[package]!}').writeAsStringSync(text);
+    });
+  }
+
+  /// [package]'s BUILD file with buildozer's removals, and nothing else
+  /// changed. A file already formatted is exactly what buildozer wrote.
+  Future<String> _result(String package) async {
+    final path = files[package]!;
+    final original = File('$workspace/$path').readAsStringSync();
+    final formatted = _formatted[package]!;
+    final edited = File('$root/$path').readAsStringSync();
+    if (original == formatted) return edited;
+    final confined = applyRemovals(
+      original: original,
+      formatted: formatted,
+      edited: edited,
+    );
+    // The check that nothing else changed, or was missed: formatted, it
+    // says what buildozer made.
+    if (confined == null ||
+        !sameBuild(await _format(package, confined), edited)) {
+      throw _Failure(
+        '$path is not as buildifier writes it, and the removals could not '
+        'be made without reformatting it, so it was left as it is. Run '
+        'buildifier on it, then run this again.',
+      );
+    }
+    return confined;
+  }
+
+  /// [text] as buildozer formats [package]'s BUILD file.
+  Future<String> _format(String package, String text) async {
+    final check = '$root.check';
+    final file = File('$check/${files[package]!}')
+      ..createSync(recursive: true)
+      ..writeAsStringSync(text);
+    File('$check/MODULE.bazel').createSync();
+    await _run(['format', '//$package:__pkg__'], {0, 3}, directory: check);
+    return file.readAsStringSync();
+  }
+
+  Future<ProcessResult> _run(
+    List<String> arguments,
+    Set<int> expected, {
+    String? directory,
+  }) async {
     final result = await Process.run(
       buildozer,
       arguments,
-      workingDirectory: root,
+      workingDirectory: directory ?? root,
     );
     if (!expected.contains(result.exitCode)) {
       throw _Failure(
@@ -356,9 +453,27 @@ class _Mirror {
         '${result.stdout}${result.stderr}',
       );
     }
-    return result.exitCode;
+    return result;
   }
 }
+
+/// What the exit codes of `bazel build` mean, as Bazel's `ExitCode` names
+/// them.
+const _exitMeaning = {
+  1: 'the build failed; its errors are above',
+  2: 'Bazel rejected the command line or its options; the reason is above',
+  8: 'the build was interrupted',
+  9: 'another command holds the output base, and --noblock_for_lock is set',
+  32: 'something off this machine failed the build',
+  33: 'Bazel ran out of memory',
+  34: 'remote execution or caching failed',
+  36: 'the local environment failed the build, a full disk say',
+  37: 'Bazel crashed',
+  38: 'uploading the build events failed',
+  39: 'the remote cache evicted outputs the build needed; build again',
+  45: 'uploading the build events failed, and retrying will not help',
+  48: 'fetching an external repository failed',
+};
 
 Never _fail(String message, int code) {
   stderr.writeln('$_name: $message');

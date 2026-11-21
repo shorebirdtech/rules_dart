@@ -4,8 +4,10 @@
 // target's check would have it, with `--dry-run` nothing, and a target a tag
 // filter leaves out only with the flags that build it. And
 // `@rules_dart//dart/unused_deps` removes from a BUILD file each written label
-// that stands only for unused deps, at the call that wrote it, and fails,
-// naming the place, on one it cannot reach.
+// that stands only for unused deps, at the call that wrote it, changes nothing
+// else in the file, however it is formatted or spells the label, fails, naming
+// the place, on one it cannot reach, and still fixes the other files when it
+// cannot edit one.
 //
 // The fixtures are this workspace's own sources, so each is put back
 // afterwards, whatever happened.
@@ -29,6 +31,21 @@ const _expected = {
   'fix/unused/BUILD.bazel': 'fix/unused/golden/BUILD.golden',
 };
 
+/// A call of `fix/unused/BUILD.bazel` as buildifier writes it, and as it does
+/// not. Nothing the fixer removes is in it.
+const _tidy = 'alias(\n    name = "hub_a",\n    actual = ":leaf",\n)\n';
+const _untidy = 'alias(name="hub_a",   actual=":leaf")\n';
+
+/// Two packages whose BUILD files the fixer is given together, as they are
+/// checked in and as the run writes them. buildifier shortens the first label
+/// and joins the second, which the fixer then cannot find in the file.
+const _spelled = 'fix/unused_spelled/BUILD.bazel';
+const _spelledTidy = '"@path"';
+const _spelledOtherwise = '"@path//:path"';
+const _joined = 'fix/unused_joined/BUILD.bazel';
+const _joinedTidy = '"//fix/unused_joined:leaf"';
+const _joinedApart = '"//fix/unused_joined" + ":leaf"';
+
 void main() {
   final workspace = Platform.environment['BUILD_WORKSPACE_DIRECTORY'];
   if (workspace == null) {
@@ -38,7 +55,8 @@ void main() {
   File file(String path) => File('$workspace/$path');
 
   final originals = {
-    for (final path in _expected.keys) path: file(path).readAsStringSync(),
+    for (final path in [..._expected.keys, _spelled, _joined])
+      path: file(path).readAsStringSync(),
   };
   for (final MapEntry(key: path, value: golden) in _expected.entries) {
     if (originals[path] == file(golden).readAsStringSync()) {
@@ -97,10 +115,15 @@ void main() {
       '//fix/unused:call.program',
       '//fix/unused:conformance_test',
     ]);
-    if (!'${unusedDry.stdout}'.contains('|//fix/unused:lib') ||
-        !'${unusedDry.stdout}'.contains('|//fix/unused:call') ||
-        !'${unusedDry.stdout}'.contains('|//fix/unused:conformance_test') ||
-        '${unusedDry.stdout}'.contains('test_pub_deps')) {
+    final removed = [
+      for (final line in '${unusedDry.stdout}'.split('\n'))
+        if (line.startsWith('-') && !line.startsWith('---'))
+          line.substring(1).trim(),
+    ];
+    if (!'${unusedDry.stdout}'.contains('--- a/fix/unused/BUILD.bazel') ||
+        !removed.contains('"@rules_dart//dart/runfiles",') ||
+        !removed.contains('":leaf",') ||
+        removed.any((l) => l.contains('test_pub_deps'))) {
       failures.add('unused_deps --dry-run printed:\n${unusedDry.stdout}');
     }
     expectFiles('after unused_deps --dry-run', originals);
@@ -130,9 +153,14 @@ void main() {
         !keptLines.any(
           (l) =>
               l.contains('fix/unused/BUILD.bazel:69:') &&
-              l.contains('in a variable or a comprehension'),
+              l.contains('in a list variable or a comprehension') &&
+              l.contains('package(features = ["-dart_unused_deps"])'),
         ) ||
-        !keptLines.any((l) => l.contains('finds no call named generated'))) {
+        !keptLines.any(
+          (l) => l.contains(
+            'a loop or a comprehension may make the target, or a variable name it',
+          ),
+        )) {
       failures.add('unused_deps of unreachable deps:\n${keptReal.stderr}');
     }
     if ('${kept(keptDry)}' != '$keptLines') {
@@ -143,11 +171,72 @@ void main() {
     }
     expectFiles('after unused_deps of unreachable deps', originals);
 
-    run('unused_deps', [
+    // A file buildifier would change keeps everything but what is removed.
+    const unusedTargets = [
       '//fix/unused:lib',
       '//fix/unused:call.program',
       '//fix/unused:conformance_test',
-    ]);
+    ];
+    const build = 'fix/unused/BUILD.bazel';
+    final untidy = originals[build]!.replaceFirst(_tidy, _untidy);
+    if (untidy == originals[build]) failures.add('$build lost its tidy alias');
+    file(build).writeAsStringSync(untidy);
+    final untidyDry = run('unused_deps', ['--dry-run', ...unusedTargets]);
+    if ('${untidyDry.stdout}'.contains('hub_a",   actual') ||
+        '${untidyDry.stdout}'.contains('+alias(')) {
+      failures.add('unused_deps --dry-run reformatted:\n${untidyDry.stdout}');
+    }
+    expectFiles('after unused_deps --dry-run of an untidy file', {
+      build: untidy,
+    });
+    run('unused_deps', unusedTargets);
+    final left = file(build).readAsLinesSync();
+    final gone = untidy.split('\n');
+    for (final line in left) {
+      if (!gone.remove(line)) failures.add('unused_deps wrote: $line');
+    }
+    final removedLines = [for (final l in gone) l.trim()]..sort();
+    if ('$removedLines' !=
+        '${['', '":hub_a",', '":hub_b",', '":leaf",', '":leaf",', '"@rules_dart//dart/runfiles",']}') {
+      failures.add('unused_deps of an untidy file removed: $removedLines');
+    }
+    file(build).writeAsStringSync(originals[build]!);
+
+    // A label buildifier spells otherwise is found, and a file the fixer cannot
+    // edit is named and left, without costing the other its fix.
+    const twoFiles = ['//fix/unused_spelled:lib', '//fix/unused_joined:lib'];
+    final spelled = originals[_spelled]!.replaceFirst(
+      _spelledTidy,
+      _spelledOtherwise,
+    );
+    final joined = originals[_joined]!.replaceFirst(_joinedTidy, _joinedApart);
+    file(_spelled).writeAsStringSync(spelled);
+    file(_joined).writeAsStringSync(joined);
+    final twoDry = run('unused_deps', ['--dry-run', ...twoFiles], fails: true);
+    if (!'${twoDry.stdout}'.contains('-    deps = [$_spelledOtherwise],') ||
+        '${twoDry.stdout}'.contains(_joined) ||
+        !'${twoDry.stderr}'.contains('$_joined is not as buildifier')) {
+      failures.add(
+        'unused_deps --dry-run of two files:\n${twoDry.stdout}${twoDry.stderr}',
+      );
+    }
+    expectFiles('after unused_deps --dry-run of two files', {
+      _spelled: spelled,
+      _joined: joined,
+    });
+    final twoReal = run('unused_deps', twoFiles, fails: true);
+    if (twoReal.exitCode != 1 ||
+        !'${twoReal.stderr}'.contains('$_joined is not as buildifier')) {
+      failures.add('unused_deps of two files:\n${twoReal.stderr}');
+    }
+    expectFiles('after unused_deps of two files', {
+      _spelled: spelled.replaceFirst('    deps = [$_spelledOtherwise],\n', ''),
+      _joined: joined,
+    });
+    file(_spelled).writeAsStringSync(originals[_spelled]!);
+    file(_joined).writeAsStringSync(originals[_joined]!);
+
+    run('unused_deps', unusedTargets);
     run('fix', ['//fix/dirty:lib', '//fix/dirty_bin:bin']);
     run('format', ['//fix/short_style:lib']);
     run('format', ['--config=deep', '//fix/deep:lib']);

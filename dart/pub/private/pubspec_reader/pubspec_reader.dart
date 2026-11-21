@@ -3,10 +3,15 @@
 //
 //   {"ok": {"name": ..., "dependencies": [...], "sdk": ... or null,
 //           "language_version": "<major>.<minor>",
+//           "flutter": ... or null, "flutter_minimum": ... or null,
+//           "unsatisfied": {<dependency>: <its constraint>, ...},
 //           "fields": <the whole document>}}
 //   {"error": "<the message pub would give, with its line and column>"}
 //
-// Usage: pubspec_reader <pubspec.yaml> [<expected package name>]
+// Usage: pubspec_reader <pubspec.yaml> [<expected package name>] [--locked=<json>]
+//
+// `--locked` gives a version for each of some packages, as a JSON object; a
+// dependency whose constraint excludes its version is `unsatisfied`.
 //
 // The file is named in messages as it is given, so a caller passes the path it
 // wants a reader to see. Any other exit than 0 with one of those lines is a
@@ -190,32 +195,28 @@ List<String> _dependencies(YamlMap fields, String field, String name) {
 /// lower bound.
 const _defaultLanguageVersion = '2.7';
 
+/// The lower bound of [constraint], pub_semver's `VersionRange.min`. None for
+/// `any`, for an upper bound alone, and for a constraint nothing satisfies.
+Version? _minimum(VersionConstraint? constraint) =>
+    constraint is VersionRange ? constraint.min : null;
+
 /// pub's `LanguageVersion.fromSdkConstraint`: the lower bound of the SDK
 /// constraint, as `<major>.<minor>`.
 String _languageVersion(VersionConstraint? constraint) {
-  Version? min;
-  if (constraint == null || constraint.isEmpty) {
-    min = null;
-  } else if (constraint is Version) {
-    min = constraint;
-  } else if (constraint is VersionRange) {
-    min = constraint.min;
-  } else if (constraint is VersionUnion) {
-    min = constraint.ranges.first.min;
-  } else {
-    throw ArgumentError('Unknown VersionConstraint type $constraint.');
-  }
+  final min = _minimum(constraint);
   return min == null ? _defaultLanguageVersion : '${min.major}.${min.minor}';
 }
 
-/// pub's `_parseEnvironment`: the Dart SDK constraint, or null for none.
-String? _sdk(YamlMap fields) {
+/// pub's `_parseEnvironment`: the constraint on each SDK, by its key. pub
+/// parses all of them, so a constraint it cannot read refuses the pubspec
+/// whichever SDK it is on.
+Map<String, (String, VersionConstraint)> _environment(YamlMap fields) {
   final node = fields.nodes['environment'];
-  if (node == null || node.value == null) return null;
+  if (node == null || node.value == null) return const {};
   if (node is! YamlMap) {
     _error('"environment" field must be a map.', node.span);
   }
-  _versionConstraint(node.nodes['sdk']);
+  final constraints = <String, (String, VersionConstraint)>{};
   for (final MapEntry(:key, :value) in node.nodes.entries) {
     final nameNode = key as YamlNode;
     final sdk = nameNode.value;
@@ -223,26 +224,57 @@ String? _sdk(YamlMap fields) {
     if (sdk == 'dart') {
       _error('Use "sdk" to for Dart SDK constraints.', nameNode.span);
     }
-    if (sdk != 'sdk') _versionConstraint(value);
+    _versionConstraint(value);
+    final text = value.value as String?;
+    if (text == null) continue;
+    try {
+      constraints[sdk] = (text, VersionConstraint.parse(text));
+    } on FormatException catch (e) {
+      final what = sdk == 'sdk' ? 'SDK' : '"$sdk" SDK';
+      _error(
+        'Could not parse the $what constraint "$text": ${e.message}',
+        value.span,
+      );
+    }
   }
-  return node['sdk'] as String?;
+  return constraints;
 }
 
-/// The language version pub gives a package with this `environment.sdk`.
-String _sdkLanguageVersion(YamlMap fields, String? sdk) {
-  if (sdk == null) return _defaultLanguageVersion;
-  try {
-    return _languageVersion(VersionConstraint.parse(sdk));
-  } on FormatException catch (e) {
-    final node = (fields.nodes['environment'] as YamlMap).nodes['sdk']!;
-    _error(
-      'Could not parse the SDK constraint "$sdk": ${e.message}',
-      node.span,
-    );
+/// The dependencies whose constraint excludes the version in [locked], with
+/// the constraint. One from a source other than a hosted one has no version
+/// to compare.
+Map<String, String> _unsatisfied(YamlMap fields, Map<String, Object?> locked) {
+  final node = fields.nodes['dependencies'];
+  if (node is! YamlMap) return const {};
+  final unsatisfied = <String, String>{};
+  for (final MapEntry(key: nameNode, value: spec) in node.nodes.entries) {
+    final name = (nameNode as YamlNode).value as String;
+    final version = locked[name];
+    if (version is! String) continue;
+    YamlNode? constraint = spec;
+    if (spec is YamlMap) {
+      final sources = spec.keys.where((k) => k != 'version' && k != 'hosted');
+      if (sources.isNotEmpty) continue;
+      constraint = spec.nodes['version'];
+    }
+    final text = constraint?.value;
+    if (text is! String) continue;
+    final VersionConstraint parsed;
+    try {
+      parsed = VersionConstraint.parse(text);
+    } on FormatException catch (e) {
+      _error('Could not parse the constraint "$text": ${e.message}', constraint!.span);
+    }
+    if (!parsed.allows(Version.parse(version))) unsatisfied[name] = text;
   }
+  return unsatisfied;
 }
 
-Map<String, Object?> read(String path, String? expectedName) {
+Map<String, Object?> read(
+  String path,
+  String? expectedName, [
+  Map<String, Object?> locked = const {},
+]) {
   final YamlNode document;
   try {
     document = loadYamlNode(
@@ -263,28 +295,41 @@ Map<String, Object?> read(String path, String? expectedName) {
   }
   final name = _name(fields, expectedName);
   final dependencies = _dependencies(fields, 'dependencies', name);
-  final sdk = _sdk(fields);
+  final environment = _environment(fields);
+  final flutter = environment['flutter'];
   return {
     'ok': {
       'name': name,
       'dependencies': dependencies,
-      'sdk': sdk,
-      'language_version': _sdkLanguageVersion(fields, sdk),
+      'sdk': environment['sdk']?.$1,
+      'language_version': _languageVersion(environment['sdk']?.$2),
+      'flutter': flutter?.$1,
+      'flutter_minimum': _minimum(flutter?.$2)?.toString(),
+      'unsatisfied': _unsatisfied(fields, locked),
       'fields': _plain(fields),
     },
   };
 }
 
-void main(List<String> args) {
-  if (args.isEmpty || args.length > 2) {
-    stderr.writeln('usage: pubspec_reader <pubspec.yaml> [<expected name>]');
+void main(List<String> arguments) {
+  const lockedFlag = '--locked=';
+  final args = arguments.where((a) => !a.startsWith(lockedFlag)).toList();
+  final lockedArgs = arguments.where((a) => a.startsWith(lockedFlag));
+  if (args.isEmpty || args.length > 2 || lockedArgs.length > 1) {
+    stderr.writeln(
+      'usage: pubspec_reader <pubspec.yaml> [<expected name>] [--locked=<json>]',
+    );
     exit(2);
   }
+  final locked = lockedArgs.isEmpty
+      ? const <String, Object?>{}
+      : jsonDecode(lockedArgs.single.substring(lockedFlag.length))
+            as Map<String, Object?>;
   // Messages are read in Bazel's output, not a terminal that draws boxes.
   glyph.ascii = true;
   Map<String, Object?> result;
   try {
-    result = read(args[0], args.length > 1 ? args[1] : null);
+    result = read(args[0], args.length > 1 ? args[1] : null, locked);
   } on SourceSpanException catch (e) {
     result = {'error': e.toString()};
   }

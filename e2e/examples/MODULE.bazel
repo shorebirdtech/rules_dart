@@ -13,7 +13,7 @@ local_path_override(
 )
 
 dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
-dart.toolchain(dart_version = "3.13.7")
+dart.toolchain(dart_version = "3.14.1")
 use_repo(dart, "dart_toolchains")
 
 register_toolchains("@dart_toolchains//:all")
@@ -181,6 +181,14 @@ pub.from_lock(
 )
 use_repo(pub, "resolve_deps")
 
+# pub/runfiles: the lock lists `runfiles` from pub.dev, where rules_dart
+# publishes it from `@rules_dart//dart/runfiles`, which is what the hub serves.
+pub.from_lock(
+    name = "runfiles_deps",
+    lock = "//pub/runfiles:pubspec.lock",
+)
+use_repo(pub, "runfiles_deps")
+
 # pub/path: the lock lists three `path` packages, as `dart pub get` writes
 # them. No Bazel target builds `local_greeting`, so it is built from its
 # directory as a hosted package is from its archive, `meta` from the lock among
@@ -195,14 +203,33 @@ pub.from_lock(
 )
 
 # `has_build` has a BUILD file of its own, so building it from its pubspec is
-# refused when its repository is fetched; CI builds `@refused//:has_build` and
-# expects the error.
+# refused, for the builds using it; CI builds `@refused//:has_build` and expects
+# the error.
 pub.from_lock(
     name = "refused",
     build_from_pubspec = ["has_build"],
     lock = "//pub/path/refused:pubspec.lock",
 )
 use_repo(pub, "path_deps", "refused")
+
+# pub/outside: a `path` package outside this workspace, named by a relative path
+# in one lock and by an absolute one in another. Both name one directory, so
+# they are one package.
+outside_absolute_lock = use_repo_rule("//pub/outside:absolute_lock.bzl", "outside_absolute_lock")
+
+outside_absolute_lock(name = "outside_absolute_lock")
+
+pub.from_lock(
+    name = "outside_deps",
+    build_from_pubspec = ["outside_greeting"],
+    lock = "//pub/outside:pubspec.lock",
+)
+pub.from_lock(
+    name = "outside_absolute_deps",
+    build_from_pubspec = ["outside_greeting"],
+    lock = "@outside_absolute_lock//:pubspec.lock",
+)
+use_repo(pub, "outside_absolute_deps", "outside_deps")
 
 # pub/git: git repositories made on the spot, beside the lock `dart pub get`
 # writes for them: no network, and every commit id is the same on every
@@ -316,6 +343,7 @@ pub.from_lock(
         "left",
         "old_a",
         "old_b",
+        "outside_theirs",
         "right",
         "theirs",
         "tri_a",
@@ -323,13 +351,18 @@ pub.from_lock(
         "tri_c",
     ],
     lock = "//fixtures/pub_cycle_refused:pubspec.lock",
-    resolve = {"mine": "//fixtures/pub_cycle_refused/mine"},
+    resolve = {
+        "mine": "//fixtures/pub_cycle_refused/mine",
+        "outside_mine": "//fixtures/pub_cycle_refused/outside_mine",
+    },
 )
 
 # `left` and `right` depend on each other, and nothing declares it.
 
 # `mine`, which a target of this workspace builds, and `theirs`, built from
 # its pubspec, depend on each other: no declaration can build that.
+
+# So do `outside_mine` and `outside_theirs`, outside this workspace.
 
 # `old_a` depends on `old_b`, but not the other way round: a stale declaration.
 pub.cycle(packages = [
@@ -412,21 +445,7 @@ local_path_override(
 )
 
 # fixtures/kernel_source_refused: each repository is declared wrongly in its
-# own way, and fails only when it is fetched. `/usr` is a directory that is
-# not a Dart SDK checkout.
-dart_kernel_source = use_repo_rule("@rules_dart//dart:repositories.bzl", "dart_kernel_source")
-
-dart_kernel_source(
-    name = "both",
-    dart_version = "3.13.7",
-    path = "/usr",
-)
-
-dart_kernel_source(
-    name = "neither",
-)
-
-dart_kernel_source(
-    name = "not_a_checkout",
-    path = "/usr",
-)
+# own way, and fails only when it is used. `/usr` is a directory that is not a
+# Dart SDK checkout.
+kernel_source_refused = use_extension("//fixtures/kernel_source_refused:extension.bzl", "kernel_source_refused")
+use_repo(kernel_source_refused, "both", "neither", "not_a_checkout")

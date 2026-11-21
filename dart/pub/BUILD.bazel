@@ -23,6 +23,13 @@ bzl_library(
 )
 
 bzl_library(
+    name = "pub_files_root",
+    srcs = ["pub_files_root.bzl"],
+    visibility = ["//visibility:public"],
+    deps = ["//dart/pub/private:pub_files_names"],
+)
+
+bzl_library(
     name = "pub_lock_package",
     srcs = ["pub_lock_package.bzl"],
     visibility = ["//visibility:public"],
@@ -31,8 +38,11 @@ bzl_library(
         ":pubspec",
         "//dart/pub/private:build_content",
         "//dart/pub/private:pub_archive",
+        "//dart/pub/private:pub_files",
         "//dart/pub/private:pub_git",
+        "//dart/pub/private:pub_lock_checks",
         "//dart/pub/private:pub_path",
+        "//dart/pub/private:pub_refusal",
     ],
 )
 
@@ -91,7 +101,10 @@ bzl_library(
     name = "pub_versions",
     srcs = ["pub_versions.bzl"],
     visibility = ["//visibility:public"],
-    deps = ["//dart/pub/private:version"],
+    deps = [
+        "//dart/pub/private:hosted_url",
+        "//dart/pub/private:version",
+    ],
 )
 
 # Every public symbol of this package's .bzl files is documented.

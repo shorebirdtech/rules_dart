@@ -27,6 +27,27 @@ packages:
       url: "https://example.invalid/foo.git"
     source: git
     version: "1.0.0"
+  from_path:
+    dependency: "direct main"
+    description:
+      path: from_path
+      relative: true
+    source: path
+    version: "1.0.0"
+  from_path_git:
+    dependency: "direct main"
+    description:
+      path: from_path_git
+      relative: true
+    source: path
+    version: "1.0.0"
+  from_outside:
+    dependency: "direct main"
+    description:
+      path: "../elsewhere/from_outside"
+      relative: true
+    source: path
+    version: "1.0.0"
   meta:
     dependency: "direct main"
     description:
@@ -34,6 +55,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.17.0"
+  registry:
+    dependency: "direct main"
+    description:
+      name: registry
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.0"
+  renamed:
+    dependency: "direct main"
+    description:
+      name: renamed
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+      url: "https://pub.dartlang.org/"
+    source: hosted
+    version: "1.0.0"
   tuple:
     dependency: "direct main"
     description:
