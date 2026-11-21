@@ -76,7 +76,7 @@ load(
     _executable_defines_config = "executable_defines_config",
     _kernel_package_config = "kernel_package_config",
 )
-load("//dart/private:dart_summary.bzl", _SUMMARY_ATTRS = "SUMMARY_ATTRS", _dart_info = "dart_info")
+load("//dart/private:dart_summary.bzl", _SUMMARY_ATTRS = "SUMMARY_ATTRS", _dart_info = "dart_info", _data_runfiles = "data_runfiles")
 load(
     "//dart/private:exec_groups.bzl",
     _EXEC_TOOLS_TOOLCHAIN = "EXEC_TOOLS_TOOLCHAIN",
@@ -187,6 +187,10 @@ package_info_from_metadata = _package_info_from_metadata
 # else: with no package there is no `package_name`, no `package_root`, no sources,
 # and no code assets to declare, and the signature says so.
 dart_info_no_package = _dart_info_no_package
+
+# The runfiles of `data` targets, their files and their own runfiles together:
+# what a rule passes as `runfiles` to `dart_info` or `dart_info_no_package`.
+data_runfiles = _data_runfiles
 
 # For an executable rule — a binary, a test — that also contributes packages: a
 # downstream test rule whose `srcs` are its package's `lib/` files plus an
@@ -521,9 +525,11 @@ DART_TOOLCHAIN_TYPES_ATTR = _DART_TOOLCHAIN_TYPES_ATTR
 # unused deps) as validation actions. An executable rule attaches
 # `dart_import_check_aspect` to its `deps` and returns
 # `OutputGroupInfo(**import_check_output_groups(ctx, ctx.executable._kernel_tool,
-# own_srcs, own_package, ctx.attr.deps, generated = [...]))`, merging
-# `KERNEL_TOOL_ATTR` into its `attrs`: `_validation`, and the group
-# `bazel run @rules_dart//dart/unused_deps` reads. `generated` are the Dart
+# own_srcs, own_package, ctx.attr.deps, main = ctx.file.main, generated = [...]))`, merging
+# `KERNEL_TOOL_ATTR` into its `attrs`: `_validation`, the group
+# `bazel run @rules_dart//dart/unused_deps` reads, and the group telling the
+# `dart_analyze` aspect what the program does not load. Every one of `own_srcs`
+# must be reached from `main`, the entry point among them. `generated` are the Dart
 # files the rule writes and compiles with the target's (a test's bootstrap):
 # their imports use `deps`, and they are not checked themselves.
 # A library rule whose `deps` are what its `srcs` import checks itself, as

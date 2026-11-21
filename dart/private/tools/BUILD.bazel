@@ -34,6 +34,7 @@ _ANALYZER_SRCS = [
     "analyzer.dart",
     "dart_cli.dart",
     "server_analyzer.dart",
+    "summary_analyzer/doc_imports.dart",
 ]
 
 # Run from source by the SDK's own VM, `dartvm`, which is what hosts the analysis
@@ -71,6 +72,7 @@ exports_files(
         "apply_args.dart",
         "apply_changes.dart",
         "build_events.dart",
+        "build_file_edit.dart",
         "changes.dart",
         "unused_deps_fix.dart",
         "unused_deps_main.dart",
@@ -110,7 +112,23 @@ dart_test(
     size = "small",
     srcs = ["unused_deps_fix.dart"],
     main = "unused_deps_fix_test.dart",
-    deps = ["@ext_pub_deps//:test"],
+    deps = [
+        "@ext_pub_deps//:diffutil_dart",
+        "@ext_pub_deps//:test",
+    ],
+)
+
+dart_test(
+    name = "build_file_edit_test",
+    size = "small",
+    srcs = ["build_file_edit.dart"],
+    args = ["$(rlocationpath @buildozer_binary//:buildozer.exe)"],
+    data = ["@buildozer_binary//:buildozer.exe"],
+    main = "build_file_edit_test.dart",
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 dart_test(
@@ -294,32 +312,30 @@ dart_binary(
     deps = ["@ext_pub_deps//:args"],
 )
 
-_KERNEL_TOOL_SRCS = [
+# `kernel_tool check`, which the import check tests compile alone.
+_KERNEL_TOOL_CHECK_SRCS = [
     "kernel_tool/args.dart",
     "kernel_tool/check_command.dart",
-    "kernel_tool/commands.dart",
-    "kernel_tool/compile.dart",
     "kernel_tool/cycle.dart",
-    "kernel_tool/declared_view.dart",
-    "kernel_tool/digest_command.dart",
     "kernel_tool/directives.dart",
-    "kernel_tool/entry_command.dart",
-    "kernel_tool/frontend_command.dart",
-    "kernel_tool/link_command.dart",
     "kernel_tool/manifest.dart",
-    "kernel_tool/module_command.dart",
     "kernel_tool/module_graph.dart",
     "kernel_tool/policy.dart",
     "kernel_tool/sources.dart",
     "kernel_tool/unused_deps.dart",
     "kernel_tool/uris.dart",
-    "kernel_tool/worker_command.dart",
 ]
 
-_KERNEL_TOOL_DEPS = [
-    "@ext_pub_deps//:analyzer",
-    "@ext_pub_deps//:bazel_worker",
-    "@ext_pub_deps//:crypto",
+_KERNEL_TOOL_SRCS = _KERNEL_TOOL_CHECK_SRCS + [
+    "kernel_tool/commands.dart",
+    "kernel_tool/compile.dart",
+    "kernel_tool/declared_view.dart",
+    "kernel_tool/digest_command.dart",
+    "kernel_tool/entry_command.dart",
+    "kernel_tool/frontend_command.dart",
+    "kernel_tool/link_command.dart",
+    "kernel_tool/module_command.dart",
+    "kernel_tool/worker_command.dart",
 ]
 
 # Built without the import check, which it runs for everything else.
@@ -331,7 +347,11 @@ dart_tool_binary(
     # Public: rule sets with their own platform link through it
     # (`KERNEL_TOOL_ATTR` in `//dart:utils.bzl`).
     visibility = ["//visibility:public"],
-    deps = _KERNEL_TOOL_DEPS,
+    deps = [
+        "@ext_pub_deps//:analyzer",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:crypto",
+    ],
 )
 
 dart_test(
@@ -339,7 +359,12 @@ dart_test(
     size = "small",
     srcs = _KERNEL_TOOL_SRCS,
     main = "kernel_tool_test.dart",
-    deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+    deps = [
+        "@ext_pub_deps//:analyzer",
+        "@ext_pub_deps//:bazel_worker",
+        "@ext_pub_deps//:crypto",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 # `kernel_tool frontend` over the SDK's real front end: silent on success, the
@@ -386,17 +411,23 @@ dart_test(
 dart_test(
     name = "import_policy_test",
     size = "small",
-    srcs = _KERNEL_TOOL_SRCS,
+    srcs = _KERNEL_TOOL_CHECK_SRCS,
     main = "import_policy_test.dart",
-    deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+    deps = [
+        "@ext_pub_deps//:analyzer",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 dart_test(
     name = "unused_deps_test",
     size = "small",
-    srcs = _KERNEL_TOOL_SRCS,
+    srcs = _KERNEL_TOOL_CHECK_SRCS,
     main = "unused_deps_test.dart",
-    deps = _KERNEL_TOOL_DEPS + ["@ext_pub_deps//:test"],
+    deps = [
+        "@ext_pub_deps//:analyzer",
+        "@ext_pub_deps//:test",
+    ],
 )
 
 dart_test(
@@ -512,6 +543,7 @@ _SUMMARY_ANALYZER_SRCS = [
     "summary_analyzer/analyze.dart",
     "summary_analyzer/args.dart",
     "summary_analyzer/context.dart",
+    "summary_analyzer/doc_imports.dart",
     "summary_analyzer/guards.dart",
     "summary_analyzer/report.dart",
     "summary_analyzer/summarize.dart",
@@ -573,6 +605,7 @@ dart_binary(
     for name, tool, extra in [
         ("summary_analyzer_test", ":summary_analyzer", []),
         ("summary_analyzer_checkout_test", "@analyzer_checkout_source//:summary_analyzer", []),
+        ("summary_analyzer_unserved_test", "@analyzer_unserved_source//:summary_analyzer", []),
         (
             "summary_analyzer_prefixed_test",
             "@analyzer_prefixed_source//analyzer_source:summary_analyzer",
@@ -602,6 +635,7 @@ dart_binary(
     for name, tool, extra in [
         ("kernel_outline_test", "@dart_kernel_source//:outline_tool", []),
         ("kernel_outline_checkout_test", "@kernel_checkout_source//:outline_tool", []),
+        ("kernel_outline_unserved_test", "@kernel_unserved_source//:outline_tool", []),
         (
             "kernel_outline_prefixed_test",
             "@kernel_prefixed_source//kernel_source:outline_tool",

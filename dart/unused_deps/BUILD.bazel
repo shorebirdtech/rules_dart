@@ -6,12 +6,13 @@ load("//dart/private:dart_binary.bzl", "dart_binary")
 #   bazel run @rules_dart//dart/unused_deps -- --dry-run //app:all
 #   bazel run @rules_dart//dart/unused_deps -- --config=deep -- //app/... -//app/gen/...
 # After `--dry-run`, the arguments are `bazel build`'s. `--dry-run` prints the
-# buildozer commands instead of running them.
+# edits as a diff instead of making them.
 dart_binary(
     name = "unused_deps",
     srcs = [
         "//dart/private/tools:apply_args.dart",
         "//dart/private/tools:build_events.dart",
+        "//dart/private/tools:build_file_edit.dart",
         "//dart/private/tools:unused_deps_fix.dart",
     ],
     args = [
@@ -23,5 +24,8 @@ dart_binary(
     data = ["@buildozer_binary//:buildozer.exe"],
     main = "//dart/private/tools:unused_deps_main.dart",
     visibility = ["//visibility:public"],
-    deps = ["//dart/runfiles"],
+    deps = [
+        "//dart/runfiles",
+        "@ext_pub_deps//:diffutil_dart",
+    ],
 )

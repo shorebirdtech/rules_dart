@@ -2,184 +2,27 @@
 
 Bazel rule set for building Dart applications and libraries.
 
-## What's New
+## Features
 
-- **Many breaking API changes.** See detailed changelog notes. In general the
-  reasons are:
-  - More idiomatic Bazel APIs
-  - Improving consistency across rules_dart and rules_flutter
-  - Handling various edge cases
-  - Added features where the new feature's ideal name was already taken
-- **Support for git and path packages from pubspec.**
-- **Deeper Bazel integration.** Integration into RBE, coverage, and some other
-  niche features like automatic execution groups. RBE is big because you can
-  offload Dart and Flutter build and test work to big machines in the cloud.
-  Several changes to improve hermeticity. With standard Bazel exceptions,
-  anything non-hermetic in these rules is a bug.
-- **Faster Dart analysis.** The main improvement is the addition of analysis
-  summaries, which means making a "summary" of each Dart package that analysis
-  can cache and reuse, and avoid reanalysis if they haven't changed. This is a bit risky because it's not
-  supported by core Dart. It gives fast `dart analyze` even on large codebases,
-  at the risk of encountering some Dart SDK bugs. It's on by default; turn it
-  off with `--@rules_dart//dart:analysis_summaries=false`. Other speed
-  improvements include using persistent analysis workers.
-- **Unused dependencies check.** Helpful for optimizing builds.
-
-### Migrating from 0.8
-
-Summary of what to do, with details below. Running Gazelle
-after step 1 does steps 6–8 and 23 for the BUILD files it writes.
-
-**MODULE.bazel**
-
-1. `@rules_dart//gazelle/dart` → `bazel_dep(name = "rules_dart_gazelle_plugin")`,
-   loaded as `@rules_dart_gazelle_plugin//dart`. `gazelle` and `rules_go` now
-   come with that module, not with rules_dart.
-2. Dart SDK 3.11.x/3.12.x → 3.13.2 or later. The root's `dart.toolchain` pin
-   is now used exactly; `allow_upgrade_by_dependencies = True` restores
-   raising it.
-3. `pub.from_lock(on_version_conflict = ...)` → removed; the highest version
-   any module or lock asks for is built. `ignore_hooks` in a module other
-   than the root → fails.
-4. `pub.package(deps = ...)` → removed; dependencies come from the package's
-   pubspec. A `pub.package()` whose `hook/build.dart` nothing replaces now
-   fails: `ignore_hook = True` if its native code is unused.
-5. A lock with `path` packages → list each in `pub.from_lock(resolve = ...)`,
-   `build_from_pubspec = [...]` or `ignored = {...}`. Packages that depend on
-   each other → `pub.cycle()` (the error gives it). A lock with no `sha256`
-   for its hosted packages (written by a pub older than 2.19) → re-resolve it
-   with `bazel run @rules_dart//dart/pub -- get`.
-
-**BUILD files**
-
-6. Package facts on rules (`package_name`, `language_version`, `version`,
-   `link_hook`, `has_unreplaced_hook` and `code_assets` on `dart_library`, and
-   the first two on `dart_binary`, `dart_test`, the web binaries and codegen
-   rules) → one `dart_package_metadata` per package (stating `version`,
-   `license_file`, `build_hook`, `link_hook`, `code_assets`, `data_assets`),
-   and `package` naming it on each target. Gazelle writes it at the package
-   root as `pubspec-metadata`.
-7. Gazelle now writes one `dart_library` per package, at its root, holding
-   all of `lib/`. Hand-written splits still work: several `dart_library`s at
-   the root or under `lib/`, each naming the same metadata, with an import
-   across them failing unless the importer `deps` on the holder.
-8. `<builder>_library` codegen macros (`json_serializable_library`,
-   `freezed_library`, …) → `<builder>_codegen`, whose outputs go in the
-   `dart_library`'s `srcs`. `go_router_library` → removed (rules_flutter ships
-   it).
-9. `@rules_dart//dart/ext/_shared:defs.bzl` → `@rules_dart//dart/ext:defs.bzl`;
-   the combining shim → `@rules_dart//dart/ext/combining_shim:bin`;
-   `shared_part_library`/`library_builder_library` → `shared_part_codegen`/
-   `library_builder_codegen`.
-10. `dart_format` / `dart_fix` targets → `bazel run @rules_dart//dart/format --
-    <patterns>` / `bazel run @rules_dart//dart/fix -- <patterns>`.
-11. `dart_binary(compile_mode = "jit-snapshot")` → `"kernel"`,
-    `"aot-snapshot"` or `"exe"`. `$(location)` of a `kernel`/`aot-snapshot`
-    binary now names a launcher. `dart_compile_flags = ["--save-debugging-info"]`
-    → `--@rules_dart//dart:split_debug_info`; `--resolve-dwarf-paths` in
-    them → refused.
-12. `dart_binary.code_assets_from_deps` → `code_assets_from_packages`.
-13. `dart_test.yaml` → attributes on the `dart_test` (`include_tags`,
-    `exclude_tags`, `tags`, …). Tests now run in their package's root, as
-    `dart test` does: fix paths that assumed the workspace root. A test
-    running SDK commands adds `@rules_dart//dart` to its `data`.
-14. `dart_link_hook` → `dart_program_assets`, providing
-    `DartProgramAssetsInfo` in place of `DartDataAssetInfo`; its output,
-    `<name>.program_assets`, lists what ships for `ProgramAssets.read`
-    (`@rules_dart//dart/program_assets`). It takes the program's own
-    `package`, which must be the recording `dart_binary`'s; that package's
-    link hook now runs too.
-    `dart_link_hook.data_assets` → removed; an id a rule names at analysis
-    time goes in the `link_hook_assets` of its package's
-    `dart_package_metadata`, which the hook must always emit.
-15. Gazelle: `# gazelle:dart_package_name`/`dart_language_version` stop at a
-    nested `pubspec.yaml`; a package's root is its innermost pubspec;
-    `build.yaml` parts Gazelle cannot carry fail until handled or marked
-    `# gazelle:dart_build_yaml_ignore <key path>`. A package name or language
-    version that `pubspec.yaml`, a directive and the metadata state
-    differently fails the run. Gazelle now writes a `dart_test`'s `tags` from
-    `@Tags` and its `target_compatible_with` from `@TestOn`: mark hand-written
-    ones `# keep`.
-16. A package's own `hook/build.dart` → Gazelle states it as the metadata's
-    `build_hook`, which fails the package's binaries and tests until the
-    metadata's `code_assets` or `data_assets` replace it; an unused hook →
-    `# gazelle:exclude hook/build.dart`.
-17. An import by `file:` URI, with a query or fragment, or by a relative path
-    into `lib/` from outside it (`../lib/a.dart`), and a `part` its
-    `dart_library` does not hold → fail the import check; import by
-    `package:` URI.
-18. `Runfiles.rlocation` (`@rules_dart//dart/runfiles`) of a path with `.` or
-    `..` segments → throws, as Bazel's runfiles libraries do.
-19. `@rules_dart//dart/ext/tools:check_dual_build_collisions` → removed; the
-    build generates the code, and `build_runner` does not run beside it.
-20. `dart_source_set` → removed; assemble the directory with bazel_lib's
-    `copy_to_directory` (same `srcs`, `root_paths`, `replace_prefixes`) and pass
-    it to `dart_library.srcs_dir`.
-21. Analysis now reads dependencies' analyzer summaries. If a project hits
-    an SDK summary bug, `--@rules_dart//dart:analysis_summaries=false`.
-    `--@rules_dart//dart:analysis_shutdown_workaround` → removed; analysis
-    runs in persistent workers (`analysis_worker=false` for a process each).
-22. `dart_code_asset.shared_library` → `file`; `dart_code_asset.system_uri` →
-    `uri` (upstream `CodeAsset.file` and `DynamicLoadingSystem.uri`).
-23. `generator_bin` on `dart_codegen`, `dart_aggregate_codegen` and
-    `dart_sqlcodegen` → `generator`. A `.dart` script as `generator` or
-    `generator_script` → a `dart_binary` whose `main` calls `shimMain` with a
-    `package:build` Builder (see `docs/ext.md`); its flags → `config` options.
-24. A dep that none of a target's files imports → fails the build; remove it
-    from `deps`. A dep needed without an import → `features =
-    ["-dart_unused_deps"]` on the target (see [Deps match imports](#deps-match-imports)).
-    `bazel run @rules_dart//dart/unused_deps -- //...` removes such deps.
-
-**Rule authors** (`@rules_dart//dart:utils.bzl` and providers)
-
-25. `DartCodeAssetInfo.dynamic_library` → `file`; `DartCodeAssetInfo.system_uri`
-    → `uri`.
-26. `DartPackageInfo.lib_root` → `package_root`; `derive_lib_root` →
-    `derive_package_root`; `has_unreplaced_hook` → `unreplaced_hook`.
-27. `DartInfo.package_name`/`lib_root` → `DartInfo.packages` (from
-    `DartPackageInfo(...)`); `DartInfo.deps` values are tuples of package
-    names. Build `DartInfo` with `dart_info(ctx = ctx, ...)` and merge
-    `SUMMARY_ATTRS` into the rule's attributes.
-28. `dart_analyzable_info` → `dart_analyzable_info_no_package` (`srcs` →
-    `entry_srcs`); `dart_analyzable_info_with_package` → `dart_analyzable_info`
-    (takes `packages`); `DartAnalyzableInfo.srcs` → `entry_srcs`,
-    `package_srcs` → `DartInfo.srcs`.
-29. `module_defines_transition` → `executable_defines_config`;
-    `dart_entry_kernel_action` takes no `defines` and needs
-    `MODULAR_KERNEL_ATTR`.
-30. `dart_link_hook_actions(ctx, runner, recorded_uses, deps, data_asset_ids,
-    name)` → `dart_program_assets_actions(ctx, package, deps, name,
-    recorded_uses)` (a `DartRecordedUsesInfo`, or `None` not to link), whose
-    `info` is a `DartProgramAssetsInfo`; `link_hook_runner_attr()` →
-    `program_assets_attrs()`, beside `PROGRAM_ASSETS_TOOLCHAINS` and
-    `fragments = ["cpp"]`. `collect_transitive_code_assets`,
-    `resolve_code_assets` and `code_asset_identity` → removed; the code
-    assets a program's kernel maps are `program_kernel_code_assets(info)`, with
-    the rule's own as `dart_program_assets_actions()`'s `code_assets` argument.
-31. `DartKernelSdkInfo.runtime` → `aot_runtime`; `platform`/`defines` →
-    `runtimes` (from `dart_kernel_runtime`).
-32. `dart_toolchain.sdk_root`, `DartSdkInfo.sdk_root`/`tool_files` →
-    `dart_toolchain.sdk` takes a `dart_sdk_files`; read `DartSdkInfo.files`.
-    A Dart SDK with no release tag also needs a `dart_outline_toolchain` and a
-    `dart_analyzer_toolchain`, or `outline_kernel` and `analysis_summaries`
-    off (see [A Dart SDK of your own](#a-dart-sdk-of-your-own)).
-33. `parse_pubspec_deps`/`parse_pubspec_sdk_constraint`/
-    `derive_language_version` → `read_pubspec` in `//dart/pub:pubspec.bzl`.
-    `dart/pub/pub_lock_hub.bzl` → private.
-34. `colocate_entrypoint` → removed; a binary compiles its sources in place.
-35. Loads of `dart/private/**` or `dart/pub/private/**` from outside rules_dart
-    → fail; load the public `.bzl` files instead.
-36. A dep that is used without an import (a plugin registered by native
-    code) → its rule returns `DartUsedWithoutImportInfo`. A library rule
-    whose `deps` are what its `srcs` import → checks itself with
-    `library_import_check` and `LIBRARY_IMPORT_CHECKER_ATTRS`, as
-    `dart_library` does; the import check aspect skips it.
-37. `import_check_validation` → `import_check_output_groups`, with the same
-    arguments. It returns a dict for `OutputGroupInfo(**...)`: `_validation`,
-    and `dart_unused_deps`, which the fixer reads. A rule that writes Dart
-    files it compiles with the target's own, such as a test's bootstrap,
-    passes them as `generated`. Their imports count as uses of `deps`. They
-    aren't checked for what they import, since the rule wrote them.
+- **Industrial-strength builds.** No stale caches, no `build_runner clean`, no
+  "works on my machine." Bazel builds some of the largest codebases in the
+  world, and serious bugs in it are rare. Every result is cached by its exact
+  inputs, so a rebuild either reuses a correct result or redoes the work, and a
+  teammate's machine or CI gets the same answer yours did. rules_dart puts
+  Dart on that footing.
+- **Remote execution.** Dart build, analysis and test work can run on RBE. This
+  is big, because it means you can hand Dart and Flutter builds and tests to big
+  machines in the cloud.
+- **Hermetic builds.** Bazel downloads the pinned Dart SDK and every pub
+  package. Nothing comes from a system install.
+- **Code generation without build_runner.** Each generator is a Bazel target
+  that runs per file, in parallel and cached, instead of one whole-package
+  `build_runner` pass. Shims come bundled for json_serializable, freezed,
+  built_value, mockito, copy_with_extension_gen, stacked and drift.
+- **Native code built by Bazel.** Native code comes from ordinary `cc_library`
+  targets instead of a package's build hook. So it's cross-compiled, cached
+  and remote-executable like everything else. sqlite3 and webcrypto come ready
+  to use.
 
 ## Road to 1.0
 
@@ -224,18 +67,18 @@ me so we can collaborate.
 
 ## Installation
 
-rules_dart needs Bazel 9.0.0 or newer. Add this to your `MODULE.bazel`:
+rules_dart needs Bazel 9.3.0 or newer. Add this to your `MODULE.bazel`:
 
 ```starlark
 bazel_dep(name = "rules_dart", version = "<the latest release>")  # https://github.com/aran/rules_dart/releases
 bazel_dep(name = "rules_dart_gazelle_plugin", version = "<the same version>")  # optional, see Gazelle
 
 dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
-dart.toolchain(dart_version = "3.13.7")
-use_repo(dart, "dart_toolchains")
-
-register_toolchains("@dart_toolchains//:all")
+dart.toolchain(dart_version = "3.14.1")
 ```
+
+rules_dart registers its toolchains itself, so there is nothing to register and
+no repository to bring in with `use_repo`.
 
 Use the newest release, which you can find in the
 [Bazel Central Registry](https://registry.bazel.build/modules/rules_dart). The
@@ -243,7 +86,10 @@ notes of each [GitHub release](https://github.com/aran/rules_dart/releases)
 start with the exact `bazel_dep` lines. The two modules are released together,
 from the same tag, so they always have the same version.
 
-`dart_version` is the Dart SDK the build downloads and uses, exactly.
+`dart_version` is the Dart SDK the build downloads and uses, exactly. Leave out
+the `dart` lines and you get the newest release rules_dart pins. To build
+with a release rules_dart doesn't pin, a fork or your own build of the SDK, see
+[Choosing a Dart SDK](#choosing-a-dart-sdk).
 
 `rules_dart_gazelle_plugin` is optional. It is a separate module so that
 rules_dart itself brings no Go dependency. Leave it out if you don't generate
@@ -399,6 +245,35 @@ same package name different ones, or one names it and the other names none.
 Then any program, test, library or analysis that reaches both fails to build,
 and the error names both targets.
 
+Two different packages can't share a name, either. Say you build a package
+named `collection` in your workspace, and a program also reaches pub's
+`collection`. The build fails and names both targets. If yours is a fork or a
+vendored copy, have it replace pub's for the whole build with
+`resolve = {"collection": "//third_party/collection"}` on `pub.from_lock()`.
+If the two only share a name, rename yours. A `dart_library` naming no package
+is called after its directory, so one in `pkg/test/` clashes with pub's `test`,
+and the error says to rename it first. (A `dart_library` with only `deps`
+is no package, so wrapping pub's `collection` in a directory called `collection`
+is fine.) Stating the same `version` on both doesn't make them one. The build
+holds one `runfiles`: pub.dev's is published from `@rules_dart//dart/runfiles`,
+so a lock's entry for it is that target, whichever version the lock names, and
+`pub.package(name = "runfiles")` is an error: depend on the target. When
+rules_dart's `pub` and
+rules_flutter's `flutter_pub` each fetch pub's `collection`, the two copies are
+one package if both fetched the same thing: the same version's archive from
+the same registry, the same git commit, or, for a `path` package both build
+from its pubspec, the same directory. If not, the build fails naming both.
+Then make the two lock files agree, or have one take the package from the
+other's hub with `resolve`, which both `from_lock`s take:
+
+```starlark
+flutter_pub.from_lock(
+    name = "flutter_deps",
+    lock = "//app:pubspec.lock",
+    resolve = {"collection": "@pub_deps//:collection"},
+)
+```
+
 If you're used to other languages in Bazel, you might expect one library per
 directory. Dart doesn't need that. Directories under `lib/` have no meaning to
 the compiler, and files in one package may import each other in a cycle. So one
@@ -519,8 +394,10 @@ package does. Then declare the cycle with `pub.cycle()`, as
 shows.
 
 You don't have to spot such a cycle yourself. When a lock lists a `resolve`
-package by a `path` inside its repository, the build reads that package's
-`pubspec.yaml` to learn what it depends on. A cycle between it and pub packages
+package by a `path`, the build reads that package's `pubspec.yaml` to learn what
+it depends on. If the package is outside the repository and its directory isn't
+there, the build goes on without it, since your target builds the package. A
+cycle between it and pub packages
 then fails when a pub package in it is first built. The error names every
 package in the cycle, the one to move to `build_from_pubspec`, and the
 `pub.cycle()` to add.
@@ -564,6 +441,39 @@ which imports `package:test`. So a test that gets `package:test` through a
 helper library still lists it, and passes. If the support files are a library of their
 own, that library carries their deps, and the test doesn't list them again.
 
+A test or binary must load every file in its `srcs`, through imports, exports
+and parts starting from `main` (or from the package's `hook/link.dart`). A file it never loads fails the build: its
+imports would count as uses of deps the program never loads, and the test
+would rerun when they change. The error names the files to drop from `srcs`:
+
+```
+//app:t: main never imports, exports or includes as a part these srcs, so the program never loads them, while what they import counts as used:
+  app/test/other_support.dart
+Remove them from srcs; a file read at run time belongs in data. features = ["-dart_unused_deps"] turns the check off.
+```
+
+A `srcs` entry holding several files (a `filegroup`, a code generator's outputs,
+a directory a rule generates) can only be dropped whole, so it fails only when
+the program loads none of its files, and the error names the entry. Several
+tests can share one `filegroup` of helpers this way. Files of it that a given
+test doesn't load are no part of that test: what they import doesn't count as
+used, the test needn't list it, and its analysis skips them. The check waits
+until no import is refused, since a refused import loads nothing it could
+follow.
+
+A `@docImport` is for documentation and needs nothing from the build. It often
+names something above the library in the dependency graph, where a dep would be
+a cycle. So it neither needs a dep nor counts as using one, and a file only a
+doc import names doesn't belong in `srcs`. When what it names isn't among the
+target's dependencies, analysis doesn't report the doc import, or the
+`comment_references` in that library it could have supplied (its `show` and `as`
+narrow those down). It does report one naming a file a fetched package doesn't
+have, as it sees all of such a package. A file of a package built in your
+workspace may be in a target this one can't see, and which `dart:` libraries
+exist depends on the platform, so a misspelled path there, a relative one or a
+`dart:` library this SDK lacks goes unreported; your IDE, which sees the whole
+package, still shows a misspelling.
+
 Some deps do their work without an import. A Flutter plugin is registered by
 native code, so the app lists it and never imports it. A plugin's rule marks
 it as such, and the check leaves it alone wherever it's listed. A dep with no
@@ -576,6 +486,13 @@ For any other dep you need without importing it, turn the check off for that
 target with `features = ["-dart_unused_deps"]`. You can also turn it off for a
 BUILD file with `package(features = ...)`, or for the whole build with
 `--features=-dart_unused_deps`.
+
+With the check off, neither an unused dep nor a file the program never loads
+fails the build, and the fixer leaves the target alone. What the program loads
+stays the same: files of a `srcs` entry that it doesn't load still need no
+`deps`, whether it loads some of the entry or none, and its analysis skips them.
+A file listed in `srcs` by itself is still checked and analyzed, since no other
+target answers for it.
 
 Gazelle writes `deps` from imports, so the BUILD files it writes pass.
 
@@ -591,17 +508,21 @@ then `bazel build` flags and patterns. It finds the labels each entry wrote, so
 it removes a dep written through an alias. It also edits the macro call that
 made a target. When a macro gives one `deps` to several targets, such as a test
 and its copy for another platform, a dep goes only if every one of them finds it
-unused. `--dry-run` prints the `buildozer` commands and changes nothing.
+unused. `--dry-run` prints the edits as a diff and changes nothing.
 
 The fixer formats every BUILD file it edits as buildifier does, so in a file not
 already in buildifier's format the diff shows reordering beyond the removals.
 Run buildifier over the files once first to keep that out of the fixer's diff.
 
-The fixer cannot edit a dep that comes from a list variable (`deps = SHARED +
-[...]`) or from a call inside a list comprehension. It prints the place in the
-BUILD file and the entry for each dep it left, and exits 1, and `--dry-run`
-reports the same deps and exits the same way. Remove those by
-hand, unless something else that uses the list needs them. Gazelle users don't
+The fixer edits BUILD files written the way Gazelle and buildozer write them:
+each target is its own call, with its deps listed in it. It leaves a dep that
+comes from a list variable (`deps = SHARED + [...]`) or from a call inside a
+list comprehension, prints the place in the BUILD file and the entry for each,
+and exits 1. `--dry-run` reports the same deps and exits the same way. A list
+several targets share gives each of them what any of them imports, so the check
+reports it on the rest: list each target's deps on the target instead. A BUILD
+file that builds its deps another way on purpose can turn the check off for its
+targets with `package(features = ["-dart_unused_deps"])`. Gazelle users don't
 need the fixer, as Gazelle writes `deps` from imports.
 
 ### Running the Dart SDK
@@ -907,15 +828,30 @@ pub.from_lock(
 )
 ```
 
-For `build_from_pubspec`, the lock has to name the directory by a relative
-path. `dart pub get` writes one when the pubspec's `path:` is relative. The
-directory must also be inside the repository that holds the lock. An absolute
-path, or one leading out of the repository, would work on only one machine, so
-it fails when the lock is read. Map such a package with `resolve` instead.
+Bazel treats a package built from its pubspec as it does a `local_repository`:
+`bazel vendor` leaves it out, the repository contents cache never holds it, and
+an edit to its files reaches the next build. If the directory isn't there, only
+the builds using the package fail.
+
+The directory can be anywhere `dart pub get` found it: inside the repository,
+at a relative path leading out of it, or at an absolute path. A package outside
+the repository ties the build to this machine. An absolute path in a lock holds
+only where the lock was written, so that lock doesn't work on another machine,
+and a relative path out of the repository needs the same directories beside
+every checkout.
 
 If two locks both build one package from its pubspec, they must name the same
-directory. A package built from its pubspec in one lock and fetched or ignored
-in another fails too.
+directory. They can spell it differently: paths that lead to one directory, once
+symbolic links are followed, are the same directory, as they are for pub. A
+package built from its pubspec in one lock and fetched or ignored in another
+fails too.
+
+A [pub workspace](https://dart.dev/tools/pub/workspaces) needs none of these.
+Its lock, the one beside the root `pubspec.yaml`, lists only the packages the
+workspace fetches, never its members. Pass that lock to `pub.from_lock()`, and
+build each member as a package of your own, with its BUILD file and its
+`dart_package_metadata`. Members that use each other name each other's targets
+in `deps`.
 
 ### Packages that depend on each other
 
@@ -997,9 +933,11 @@ other module's `pub.package()` or lock entry for it. This works like a root
 Only the root module may use `pub.settings`, `ignore_hooks` or `ignore_hook`.
 
 The Dart SDK version isn't a request. The root's `dart.toolchain` version is
-used exactly, and a module asking for a newer SDK fails the build, with an error
-that names the fix. To take the highest request instead, the root sets
-`allow_upgrade_by_dependencies = True` on its `dart.toolchain`.
+used exactly, and a module asking for a newer SDK fails any build using that SDK,
+with an error that names the fix. To take the highest request instead, the root sets
+`allow_upgrade_by_dependencies = True` on its `dart.toolchain`. A root without a
+`dart.toolchain` gets the newest SDK rules_dart supports. rules_dart asks for no
+version of its own, so the root can pin any version it supports.
 
 ### Adding a dependency
 
@@ -1060,8 +998,8 @@ reads it from each target's `package_metadata` attribute.
 | Source | purl |
 |---|---|
 | hosted (`pub.package()`, `pub.from_lock()`) | `pkg:pub/<name>@<version>?checksum=sha256:<hex>`, with `repository_url` for a registry other than pub.dev |
-| git | `pkg:pub/<name>@<version>?vcs_url=git+<url>@<commit>`, with `#<path>` for a package in a subdirectory |
-| path, `build_from_pubspec` | None. The package is yours, and states its own. |
+| git | `pkg:pub/<name>@<version>?vcs_url=git+<url>@<commit>`, with `#<path>` for a package in a subdirectory. A url relative to the lock appears as the lock writes it, so the SBOM shows a path from the lock's checkout. |
+| path, `build_from_pubspec` | None. Its files are its repository's own, and that repository states where they came from. One outside the repository has no such statement: it is this machine's files. |
 
 The Dart SDK's repositories are `pkg:generic/dart-sdk@<version>`, with the
 archive's `checksum` and `download_url`. The purl spec has no type for the SDK.
@@ -1186,7 +1124,8 @@ would:
 
 - **`lib/`**: every file goes into the package's one `dart_library` (see
   [One library per package](#one-library-per-package)).
-- **`bin/`**: each file becomes a `dart_binary`.
+- **`bin/`**: each file becomes a `dart_binary`, except a part, which goes in
+  the `srcs` of the binary that reaches it.
 - **`test/`**: each `_test.dart` file becomes a `dart_test`, and the other files
   are helpers (below).
 - **Any other directory**, such as `tool/`, `example/` or `benchmark/`: its
@@ -1216,13 +1155,15 @@ library's name fails too, and the error asks you to rename the file.
 
 Gazelle treats `test/` as `package:test` does. It makes a test of each
 `_test.dart` file, and any other file there is a helper. A helper goes in the
-`srcs` of every test that imports it, directly or through another helper. What
-the helper imports goes in that test's `deps`. A test lists a helper in its own
+`srcs` of every test that imports it, directly or through another helper, and a
+part goes in with the file that names it. What these files import goes in that
+test's `deps`. A part is never a test or a program, whatever its name. A test lists a helper in its own
 directory by file name. When tests import helpers from another directory under
 `test/`, Gazelle gives that directory a `filegroup` named after it, holding its
-helpers, and the tests list the filegroup. That filegroup is visible to the
-package's whole `test/` tree. It also holds any test file that a file elsewhere
-imports.
+helpers, and the tests list the filegroup. A test's `deps` still come only from
+the helpers it reaches, not from the rest of the filegroup. That filegroup is
+visible to the package's whole `test/` tree. It also holds any test file that a
+file elsewhere imports.
 
 When a run finds problems like these, Gazelle reports every one of them and
 then fails, before it writes any BUILD file.
@@ -1706,6 +1647,23 @@ empty package config. So `Isolate.resolvePackageUri` returns null, as it does
 in an `exe` installed on its own. Otherwise the VM would look upward from the
 program and, without a sandbox, find the workspace's own `.dart_tool`.
 
+A test that also runs under `dart test` and reads a file its package ships in
+`lib/` can take the null as its cue to use the runfiles instead, with
+[`package:runfiles`](https://pub.dev/packages/runfiles) in its pubspec (a lock
+listing it gets `@rules_dart//dart/runfiles`, the source of what pub.dev serves):
+
+```dart
+final uri = await Isolate.resolvePackageUri(
+  Uri.parse('package:my_pkg/templates/page.html'),
+);
+final page = uri != null
+    ? File.fromUri(uri) // dart test
+    : File(Runfiles.create().rlocation('_main/pkgs/my_pkg/lib/templates/page.html'));
+```
+
+The file must reach the test's runfiles: list it in `resources` of the
+`dart_library` that ships it, or in `data`.
+
 A test carries only the part of the Dart SDK that runs its compiled code: the
 `dart` launcher and the VM. A test that runs SDK commands itself, such as
 `dart compile` or `dart analyze`, needs the whole SDK. Add `@rules_dart//dart`
@@ -1734,9 +1692,8 @@ class of a library written before Dart 3.0. In those, an edit that moves code
 also recompiles the library's dependents.
 
 The outlines come from a stripper built from the source of the same Dart SDK as
-the compiler. Each Dart toolchain registers one beside it. A Dart SDK of your
-own needs one too (see [A Dart SDK of your own](#a-dart-sdk-of-your-own)). Two
-flags turn this off:
+the compiler. Each Dart SDK comes with its own (see
+[Choosing a Dart SDK](#choosing-a-dart-sdk)). Two flags turn this off:
 
 - `--@rules_dart//dart:outline_kernel=false` compiles dependents against full
   kernels instead of outlines.
@@ -2040,10 +1997,6 @@ reason and the flag that turns summaries off:
 - **`prefer_relative_imports` in a package split across targets.** The lint
   doesn't fire for a `package:` import of the same package's file in another
   target. With the lint on, the summary analyzer finds those imports and fails.
-- **`comment_references` from doc imports.** A name that an `@docImport` brings
-  in from a dependency or from the SDK is reported as not in scope. The
-  diagnostic fails the analysis anyway, and the summary analyzer says which ones
-  are false.
 - **Context messages.** A diagnostic's context message that points into a
   dependency ("'x' refers to a public property", "the error is in the field
   initializer of 'E'") loses its location or is left out. The diagnostic itself
@@ -2058,12 +2011,13 @@ over this repository, its examples, a corpus of pub packages and the analyzer's
 and linter's own tests. A loss outside the list can't be detected. Analyzing
 with the flag off is the reference.
 
-The summary analyzer must be built from the same SDK release as the Dart
-toolchain, and the `dart` extension registers it for its own SDK. A Dart SDK
-with no release tag (Flutter's beta and main channels, a local build) has no
-unmodified analyzer source to build it from. There, analysis fails and names the
-flag, unless you register an analyzer toolchain built from that SDK's checkout
-(see [A Dart SDK of your own](#a-dart-sdk-of-your-own)).
+The summary analyzer must be built from the source of the same SDK as the Dart
+toolchain, and the `dart` extension builds it for every SDK you declare with
+that source (see [Choosing a Dart SDK](#choosing-a-dart-sdk)). A platform that
+brings a Dart SDK with no release tag, such as Flutter's beta and main channels,
+registers one from that SDK's checkout (see
+[A platform that bundles Dart](#a-platform-that-bundles-dart)). Without one,
+analysis fails and names the flag.
 
 With the flag on, every library declares a summary, so any build configures the
 summary analyzer. It fetches the SDK source archive the analyzer is built from,
@@ -2225,8 +2179,9 @@ Two more `dart/ext` packages are not builders. `sqlite3`
 Bazel (see [Native code assets](#native-code-assets)).
 
 To put hand-written and generated files from any targets into one directory,
-use bazel_lib's `copy_to_directory`. A `dart_library` takes that directory as
-`srcs_dir`.
+use bazel_lib's `copy_to_directory` with `hardlink = "off"`. A `dart_library`
+takes that directory as `srcs_dir`. The default hardlinks generated files, and
+a generated symlink to one of your sources then makes the source read-only.
 
 ### A generator and its package
 
@@ -2651,6 +2606,144 @@ the whole library. The id must be the package's own, and not also one of its
 `code_assets`. The tool can't be a library of the package that names it,
 because the package would then depend on itself.
 
+**What a library was linked from.** A tool that reads a library's object files
+again needs them as inputs of its action. `dsymutil` is the usual case: a Mach-O
+library holds only a map naming the objects its debug information is in.
+`DartCodeAssetInfo.link_inputs` is a depset holding every object file and static
+archive of the link (the objects of a library that has no archive too), for a
+`cc_shared_library`, a `cc_binary` with `linkshared`, and a library linked into a
+program from `linked_code_assets`:
+
+```starlark
+asset = ctx.attr.code_asset[DartCodeAssetInfo]
+if asset.link_inputs == None:
+    fail("%s: %s" % (ctx.label, asset.link_inputs_unset_reason))
+ctx.actions.run(
+    executable = ctx.executable._dsymutil,
+    arguments = [asset.file.path, "-o", dsym.path],
+    inputs = depset([asset.file], transitive = [asset.link_inputs]),
+    outputs = [dsym],
+)
+```
+
+It can hold more than that, such as the linker's own tools, so pass it on whole
+rather than listing it. Code that comes from a library in `dynamic_deps` isn't
+there, because it isn't in this library. A prebuilt library has an empty
+`link_inputs`. When what it was linked from isn't known, `link_inputs` is
+`None`, and a consumer that needs it can `fail()` with `link_inputs_unset_reason`,
+as above. `None` has two meanings, and `link_inputs_gone` tells them apart. When it
+is `False`, the link is out of sight and naming the right target may mend it. When
+it is `True`, the files existed and the action that linked the library deleted
+them, as `rustc` does with a crate's object file: no target brings them back, and
+no tool run later can do better. A consumer with a fallback for a library without
+its objects takes it then, and one without fails as above. `link_inputs_gone` is
+`False` whenever `link_inputs` is known.
+
+`dart_code_asset` sees the link when `file` names the target that linked the
+library, or a `filegroup` around it, nested ones included. A `filegroup` that
+wraps one `cc_shared_library` binds that library's `.so`, `.dylib` or `.dll`
+when it provides that library and nothing but files the `cc_shared_library`
+provides itself, such as a Windows import library and `.pdb`. A `filegroup` that
+adds another file, or selects an `output_group` without the library, is not
+that library: `file` is then the one library file it provides, or an error that
+names its files. Wrapping several shared libraries is an error. When another
+rule forwards the library, as a platform transition does, or `file` is a copy,
+it can't see the link: the library is bound all the same, and `link_inputs` is
+`None`. The asset's `link_inputs_unset_reason` says which case it is. Name the
+`cc_shared_library`, or a `filegroup` around it; if you copied the library to
+give it another name, its `shared_lib_name` does that without a copy.
+
+A rule that has to copy the library, or links it with an action of its own, says
+what it was linked from with `DartLinkInputsInfo`. This one copies a library and
+forwards the inputs of the original, which it takes from a `dart_code_asset` of
+that library:
+
+```starlark
+load("@rules_dart//dart:providers.bzl", "DartCodeAssetInfo", "DartLinkInputsInfo")
+
+def _library_copy_impl(ctx):
+    original = ctx.attr.original[DartCodeAssetInfo]
+    if original.link_inputs == None and not original.link_inputs_gone:
+        fail("%s: %s" % (ctx.label, original.link_inputs_unset_reason))
+    copy = ctx.actions.declare_file(ctx.attr.out)
+    ctx.actions.run_shell(
+        inputs = [original.file],
+        outputs = [copy],
+        command = 'cp "$1" "$2"',
+        arguments = [original.file.path, copy.path],
+    )
+    return [
+        DefaultInfo(files = depset([copy])),
+        DartLinkInputsInfo(
+            library = copy,
+            inputs = original.link_inputs,
+            gone = original.link_inputs_gone,
+        ),
+    ]
+```
+
+`library` must be the file the target provides, or `dart_code_asset` fails. A rule
+that links with an action of its own and deletes the objects, or that copies a
+library whose `link_inputs_gone` is `True`, as the one above does, says so with
+`gone = True` in place of `inputs`; stating both, or neither, is an error.
+Behind a `filegroup`, a statement about another file than the one `file` provides
+is ignored, and two about that file must agree. Don't forward inputs for a
+stripped copy if they are for `dsymutil`: stripping removes the map naming the
+objects, so run it on the unstripped library. A rule of your own that provides
+`DartCodeAssetInfo` passes `link_inputs` itself, or `link_inputs_unset_reason`
+when it can't know, or `link_inputs_gone = True` when the files are deleted;
+one that passes none leaves `link_inputs` as `None` and `link_inputs_gone` as
+`False`, and passing `link_inputs` with either of the others is an error.
+
+**A library's dSYM.** Some builds make the dSYM while they link, and then it is
+the one to use. `rustc` does this for a `rust_shared_library` on macOS: it deletes
+the crate's object file before it finishes, so `dsymutil` run later can't find the
+crate's own line tables, and `link_inputs` is `None` with `link_inputs_gone` set.
+`DartCodeAssetInfo.dsym` is that `.dSYM` directory, or `None` when the build made
+none. A rule that wants debug symbols takes it first and falls back to
+`link_inputs`, then to what it can make without the objects:
+
+```starlark
+asset = ctx.attr.code_asset[DartCodeAssetInfo]
+if asset.dsym != None:
+    inputs = [asset.dsym]  # Copy it, or read it, as it is.
+elif asset.link_inputs != None:
+    inputs = depset([asset.file], transitive = [asset.link_inputs])  # Run dsymutil.
+elif asset.link_inputs_gone:
+    inputs = [asset.file]  # The objects no longer exist: a dSYM of the symbol table alone.
+else:
+    fail("%s: %s" % (ctx.label, asset.link_inputs_unset_reason))
+```
+
+`rules_rust` declares the dSYM only for a macOS target, so a `rust_shared_library`
+for iOS or another Apple OS has no `dsym` and no `link_inputs`. Its
+`link_inputs_gone` is still `True`, which is how a consumer knows the missing
+`link_inputs` is no mistake and no target would mend it.
+
+`dart_code_asset` sets `dsym` when the action that wrote the library also wrote
+`<library file name>.dSYM`, seen through a `filegroup` as above. That covers
+`rust_shared_library` and, under `--apple_generate_dsym`, a `cc_binary` with
+`linkshared`. A `cc_shared_library` writes no dSYM, so it has `link_inputs`
+instead. `rustc` leaves the directory empty unless the crate was compiled with
+debug information, as `-c dbg` does, and the build can't tell you which you have,
+so a rule reading `dsym` has to accept an empty one.
+
+A dSYM is matched to a library by the UUID in both, which copying, renaming or
+stripping the library leaves alone. So a rule that does one of those can pass the
+original's dSYM on with `DartDsymInfo`, next to the `DartLinkInputsInfo` of the
+example above. A rule that builds the dSYM with an action of its own says so the
+same way:
+
+```starlark
+if original.dsym != None:
+    providers.append(DartDsymInfo(library = copy, dsym = original.dsym))
+```
+
+`library` must be the file the target provides, and `dsym` a `.dSYM` directory.
+Statements behind a `filegroup` work as they do for `DartLinkInputsInfo`. A rule
+of your own that provides `DartCodeAssetInfo` passes `dsym` itself; it needs a
+`file`.
+
 **Replacements rules_dart ships.** Two packages have one, under `dart/ext`:
 
 - `package:sqlite3` 2.0.0 and later: `sqlite3_code_asset()` from
@@ -2959,6 +3052,226 @@ fails the build, so leave it off there. If you have rules of your own that pass
 a configuration's output path to an action as a string, rather than as a
 `File`, fix them first (see [Architecture](docs/ARCHITECTURE.md)).
 
+## Choosing a Dart SDK
+
+`dart.toolchain` gives you a Dart release that rules_dart pins, and that is the
+SDK a build uses unless you say otherwise. Your root module can also declare
+other SDKs, give each a name, and say which one the build uses. Each way of
+supplying an SDK is its own tag:
+
+| Tag               | The SDK                                                    |
+| ----------------- | ---------------------------------------------------------- |
+| `dart.toolchain`  | A release rules_dart pins                                  |
+| `dart.release`    | Any other published release, with checksums you provide    |
+| `dart.custom_sdk` | A Dart SDK that other repositories hold, such as a fork's  |
+| `dart.checkout`   | The SDK you built in a dart-lang/sdk checkout              |
+
+Declaring an SDK fetches nothing: Bazel fetches it only when a build uses it. So
+you can declare a checkout in the `MODULE.bazel` you commit, though only some
+machines have one. What a machine can't use fails only the build that uses it,
+saying what is wrong and the fix; `bazel fetch --all` and `bazel vendor` still
+succeed there. That holds on a machine with no Dart SDK at all, such as Linux on
+RISC-V, where every build needing Dart fails, saying so. `bazel vendor` leaves out a checkout's repositories, which hold paths on one machine.
+
+A workspace with pub packages also needs one Dart SDK while Bazel fetches, before
+any build has chosen one: rules_dart reads each pubspec with a small program of
+Dart's own YAML parser, compiled once per host. That SDK is the one `dart.use_sdk`
+names, when it can be used on the machine, and otherwise the `dart` release. So a
+project whose `dart.use_sdk` names a `dart.custom_sdk` or `dart.checkout` it has
+here downloads no other SDK. One that chooses its SDK only with the flag below,
+or a machine that can't use the chosen SDK, downloads the `dart` release too. To
+supply that release without network access, fetch once where there is access and
+carry the result over, with `bazel vendor` and `--vendor_dir`, or put the archive
+named by the error in a `--distdir` directory. An untargeted `bazel vendor` takes
+every host's SDK, so the directory serves another operating system too: what
+depends on the machine, its pubspec reader and toolchains, is left out and made
+there from what was vendored. Vendor on a machine that has a Dart SDK, since
+without one no pubspec can be read.
+
+### Saying which SDK the build uses
+
+`dart.use_sdk` in the root module chooses, with no flag or `.bazelrc` line:
+
+```starlark
+dart = use_extension("@rules_dart//dart:extensions.bzl", "dart")
+dart.release(
+    name = "next",
+    dart_version = "3.15.0",
+    sdk_sha256 = {"macos-arm64": "...", "linux-x64": "..."},
+    source_sha256 = "...",
+)
+dart.use_sdk(name = "next")
+```
+
+Without `dart.use_sdk`, the build uses `dart`, the release `dart.toolchain`
+gives. rules_dart registers the toolchains of every declared SDK itself, so
+choosing one takes nothing else.
+
+To use another SDK for one build, or on one machine, name it with a flag. The
+flag overrides `dart.use_sdk` when it is given:
+
+```sh
+bazel test //... --@rules_dart//dart:sdk=local
+```
+
+`dart.use_sdk` answers "what does this project build with?" and the flag answers
+"what does this build use instead?". Put the flag in an untracked
+`.bazelrc.user` to build with your checkout while the project keeps its default.
+A name that nothing declares fails, listing those that are declared.
+
+Only the root module can declare an SDK other than `dart`, or choose one. The
+name `dart` stays the release every module may request.
+
+### A published release
+
+`dart.release` takes any release in the Dart archive, on the stable, beta or dev
+channel, and the checksums of what it fetches:
+
+```starlark
+dart.release(
+    name = "next",
+    dart_version = "3.15.0-1.2.beta",
+    # The SDK archive of each host you build on.
+    sdk_sha256 = {
+        "macos-arm64": "...",
+        "linux-x64": "...",
+    },
+    # The GitHub archive of the release's tag.
+    source_sha256 = "...",
+    # What cross-compiling needs, by file name in the Dart archive.
+    cross_tools_sha256 = {
+        "gen_snapshot_macos_arm64_linux_x64": "...",
+        "dartaotruntime_linux_x64": "...",
+    },
+)
+```
+
+Give only what your builds need. Each missing checksum stops just the build that
+needs the file, and the error gives the file's URL and the attribute to add. If
+two names declare the same release with the same checksums, they share what is
+downloaded. The
+Dart archive publishes the checksum of each SDK archive and `gen_snapshot` beside
+it, as `<file>.sha256sum`. For a `dartaotruntime`, and for the source archive at
+`https://github.com/dart-lang/sdk/archive/refs/tags/<version>.tar.gz`, download
+the file and compute it.
+
+### An SDK from other repositories
+
+`dart.custom_sdk` takes an SDK that a repository of yours provides, such as a
+fork's build you download:
+
+```starlark
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "fork_sdk_linux",
+    build_file_content = 'exports_files(["version"])',
+    sha256 = "...",
+    strip_prefix = "dart-sdk",
+    url = "https://example.com/fork/dartsdk-linux-x64-release.zip",
+)
+
+http_archive(
+    name = "fork_source",
+    build_file_content = 'exports_files(["DEPS"])',
+    sha256 = "...",
+    strip_prefix = "sdk-main",
+    url = "https://example.com/fork/source.tar.gz",
+)
+
+dart.custom_sdk(
+    name = "fork",
+    sdk = {"linux-x64": "@fork_sdk_linux//:version"},
+    source = "@fork_source//:DEPS",
+)
+```
+
+`sdk` maps each host to the `version` file at the root of that host's SDK. The
+directory must be laid out as the Dart SDK archive is. The SDK's version is
+whatever that file says, so you don't state it again. `source` is the `DEPS` file
+at the root of the SDK's source.
+
+### Your own build
+
+`dart.checkout` uses an SDK built in a dart-lang/sdk checkout with
+`tools/build.py --mode=release --arch=arm64 create_sdk`. The path is specific to
+your machine, so it isn't in `MODULE.bazel`:
+
+```starlark
+dart.checkout(name = "local")
+```
+
+```bazelrc
+# .bazelrc.user
+common --repo_env=DART_CHECKOUT=/path/to/dart-sdk/sdk
+common --@rules_dart//dart:sdk=local
+```
+
+Bazel picks the SDK built for your machine in `out/` or `xcodebuild/`. If there
+are several, the build fails and lists them, and you choose one with
+`--repo_env=DART_CHECKOUT_BUILD=ReleaseARM64`. Rebuilding the SDK or editing its
+`pkg/` is picked up by the next build. To declare a second checkout, give it its
+own variables with `path_env` and `build_env`. A repository that lays out a
+checkout itself can be named instead, with `checkout = "@tree//:DEPS"`.
+
+### What comes with each SDK
+
+The outline stripper (see [How tests are compiled](#how-tests-are-compiled)) and
+the summary analyzer (see [Analysis against summaries](#analysis-against-summaries))
+must come from the same source as the compiler, and each SDK brings its own: a
+release from its tag's archive, `dart.custom_sdk` from `source`, a checkout from
+its `pkg/`. Without that source, a build needing a tool fails, naming what to
+add and the flag that turns the tool off.
+
+Those `pkg/` packages have dependencies of their own, which come from
+rules_dart's pub packages, not from the SDK. They suit the releases rules_dart
+pins and, usually, those near them. If an SDK's `pkg/` needs a package they don't
+include, or a version they don't have, a build running that tool fails, naming the
+SDK, the package and the flag. Nothing else about the SDK is affected: with the
+flag, or with a rules_dart whose packages suit it, it builds as any other.
+
+### Cross-compiling
+
+Cross-compiling needs files the SDK doesn't include: a `gen_snapshot` that runs
+on your host and writes for the target, and, for an `exe`, the target's
+`dartaotruntime`. An `aot-snapshot` holds no runtime, but `dart compile` asks for
+one anyway before Dart 3.15.0-81.0.dev, so a release older than that needs both
+files for one too. A release fetches them, with the checksums in
+`cross_tools_sha256`. For the other two kinds, `cross_tools` names them, by the
+same file names, and an `aot-snapshot` needs only `gen_snapshot`, at any version:
+
+```starlark
+dart.custom_sdk(
+    name = "fork",
+    sdk = {"macos-arm64": "@fork_sdk_macos//:version"},
+    cross_tools = {
+        "gen_snapshot_macos_arm64_linux_x64": "@fork_tools//:gen_snapshot_linux_x64",
+        "dartaotruntime_linux_x64": "@fork_tools//:dartaotruntime_linux_x64",
+    },
+)
+```
+
+`gen_snapshot` must be executable. A checkout needs less: `create_sdk` leaves a
+`gen_snapshot_product_linux_<arch>` beside the SDK, and Bazel uses it. The target's
+runtime comes from a build for that target, so `dart.checkout` usually names just
+`dartaotruntime_<target>`, from that build or a release. A cross build missing
+a file it needs fails, naming the file and this attribute.
+
+### The oldest SDK
+
+rules_dart compiles its own tools with the SDK a build uses, so that SDK must be
+Dart 3.13.0 or newer. A build using an older one fails, saying so.
+
+### Dependencies' version requests
+
+A module that isn't the root still asks for a version with `dart.toolchain`, and
+that request is a minimum whichever SDK the build uses. If the SDK in use is older
+than a dependency asks, the build fails naming the module and the version. That
+holds for every kind of SDK, including those whose version only their `version`
+file says, and it is checked when the SDK is used. `allow_upgrade_by_dependencies`
+applies only to `dart.toolchain`, since no dependency can raise an SDK you
+supply.
+
 ## Flags
 
 These are all the command-line settings rules_dart reads. Set one per
@@ -2966,9 +3279,9 @@ invocation, or in `.bazelrc` as
 `common --@rules_dart//dart:<name>=<value>`.
 
 Build tools, such as codegen builders or any `cfg = "exec"` Dart tool, are built
-the same whatever you set most of these to. Three are the exception:
-`modular_kernel`, `outline_kernel` and `analysis_summaries` keep Bazel's default
-scope, so they apply in the exec configuration too. `outline_kernel` and
+the same whatever you set most of these to. Four are the exception: `sdk`,
+`modular_kernel`, `outline_kernel` and `analysis_summaries` have
+`scope = "universal"`, so they apply in the exec configuration too. `outline_kernel` and
 `analysis_summaries` need that because the tools they select are themselves
 resolved in the exec configuration.
 
@@ -2982,6 +3295,7 @@ resolved in the exec configuration.
 | `--@rules_dart//dart:modular_kernel`               | on          | Compiles each library once into kernel modules that tests link. Off, each test compiles its whole program from source.                                                                         |
 | `--@rules_dart//dart:outline_kernel`               | on          | Compiles dependents against outlines of their dependencies' modules, made by the Dart SDK's outline toolchain. Off, they compile against full kernels.                                         |
 | `--@rules_dart//dart:runner_snapshot`              | off         | Starts the `package:test` runner from a snapshot cached on the machine (see [Faster tests and builds](#faster-tests-and-builds-optional)). Off, it starts from its kernel and touches no cache. |
+| `--@rules_dart//dart:sdk=<name>`                   | none        | Builds with this declared Dart SDK, instead of the one `dart.use_sdk` chooses (see [Choosing a Dart SDK](#choosing-a-dart-sdk)).                                                               |
 | `--@rules_dart//dart:split_debug_info`             | off         | Leaves an `exe`'s or `aot-snapshot`'s debugging information out of it, and writes it to `<name>.symbols` in the `debug_info` output group. Stack traces then print as addresses.              |
 | `--@rules_dart//dart:track_creation_locations`     | off         | Compiles VM kernels with `--track-creation-locations` (`--track-widget-creation`).                                                                                                             |
 
@@ -3296,45 +3610,45 @@ from `dart_analyzable_info()` for a target whose sources belong to a package, or
 A repository rule can read a `pubspec.yaml` the way `pub.from_lock()` does, with
 `read_pubspec(rctx, package_name)` from `@rules_dart//dart/pub:pubspec.bzl`. It
 uses Dart's own `package:yaml`, the loader pub uses, and refuses what pub
-refuses, with pub's message. It returns the pubspec's `name`, `dependencies`,
-`sdk_constraint` and `language_version`, and the whole document as `fields`.
+refuses. It returns `struct(error, pubspec)`, so your rule decides what a refusal
+means: `error` is pub's message, naming the package, or None, and `pubspec` then
+has the `name`, `dependencies`, `sdk_constraint` and `language_version`, and the
+whole document as `fields`. rules_dart's own repositories still fetch for a
+package pub refuses, and only a build using the package fails, with that message.
 
-### A Dart SDK of your own
+### A platform that bundles Dart
 
-Each Dart toolchain registers two tools beside the compiler: the outline
-stripper (see [Tests](#tests)) and the summary analyzer (see
+To build with a Dart SDK of your own, use the tags in
+[Choosing a Dart SDK](#choosing-a-dart-sdk). This section is for a rule set whose
+platform carries a Dart SDK in its own toolchains, as a Flutter engine does.
+
+Each Dart toolchain has two tools beside the compiler: the outline stripper (see
+[Tests](#tests)) and the summary analyzer (see
 [Analysis against summaries](#analysis-against-summaries)). Both are built from
-the source of the same SDK release.
+the source of the same SDK.
 
-A Dart SDK with no release tag has no such source to fetch. That includes a
-fork, a local build, and Flutter's beta and main channels. It needs its own
-tools, built from its source checkout. In a Flutter engine checkout that is
-`third_party/dart`. Each has an off switch if you'd rather not build it.
+If the platform bundles a published Dart release, build its tools with
+`dart_kernel_source` and `dart_analyzer_source`, functions in
+`@rules_dart//dart:repositories.bzl` that a module extension calls, giving
+`dart_version` and `sha256`, the checksum of that tag's source archive on GitHub.
 
-**Outlines.** Register a `dart_outline_toolchain`, from
-`@rules_dart//dart:toolchain.bzl`. Its `tool` is the `:outline_tool` of a
-`dart_kernel_source(path = "<checkout>")` repository, built on that checkout's
-`pkg/kernel`. Or turn outlines off with
-`--@rules_dart//dart:outline_kernel=false`.
-
-**Summaries.** Register a `dart_analyzer_toolchain`, from the same file. Its
-`tool` is the `:summary_analyzer` of a
-`dart_analyzer_source(path = "<checkout>")` repository, built on that
-checkout's `pkg/analyzer` and `pkg/linter`. Or turn summaries off with
-`--@rules_dart//dart:analysis_summaries=false`.
-
-`dart_kernel_source` and `dart_analyzer_source` are repository rules in
-`@rules_dart//dart:repositories.bzl`, for `use_repo_rule`. A repository rule of
-your own that already reads the checkout can call
+A Dart SDK with no release tag, such as Flutter's beta and main channels, needs
+tools built from its checkout, which in a Flutter engine checkout is
+`third_party/dart`: give the same functions `path = "<checkout>"`. A repository rule
+of your own that already reads the checkout can call
 `fetch_dart_kernel_source(rctx, path, prefix)` or
 `fetch_dart_analyzer_source(rctx, path, prefix)`, from the same file. These put
 the same packages and tool in a directory of its own repository.
 
-Each toolchain's `version` is that of the Dart toolchain whose kernels or
-analysis it serves. Set its `tool` only when its flag is on, so that the tool
-isn't built otherwise. For example:
+Register the tools with a `dart_outline_toolchain` and a
+`dart_analyzer_toolchain`, from `@rules_dart//dart:toolchain.bzl`. Each toolchain's
+`tool` is the repository's `:outline_tool` or `:summary_analyzer`, and its
+`version` is that of the Dart toolchain whose kernels or analysis it serves. Set
+`tool` only when its flag is on, so that the tool isn't built otherwise:
 `select({"@rules_dart//dart:is_outline_kernel": ..., "//conditions:default": None})`,
-or `:is_analysis_summaries` for the analyzer.
+or `:is_analysis_summaries` for the analyzer. Or turn each off with
+`--@rules_dart//dart:outline_kernel=false` and
+`--@rules_dart//dart:analysis_summaries=false`.
 
 ## Examples
 

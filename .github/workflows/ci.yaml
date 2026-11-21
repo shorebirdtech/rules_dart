@@ -44,6 +44,7 @@ jobs:
           "e2e/smoke",
           "e2e/examples",
           "e2e/root_settings",
+          "e2e/custom_sdk",
           "overhead",
           "dev"
         ]
@@ -245,7 +246,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      USE_BAZEL_VERSION: 9.0.0
+      USE_BAZEL_VERSION: 9.3.0
     strategy:
       fail-fast: false
       matrix:
@@ -261,8 +262,10 @@ jobs:
       - name: Bazel ${{ env.USE_BAZEL_VERSION }} — ${{ matrix.folder }}
         working-directory: ${{ matrix.folder }}
         run: bazel test --lockfile_mode=off --test_output=errors //...
-  # Bazel's latest release candidate, weekly: an upstream change that breaks us
-  # shows before its release. A red run here never blocks a merge.
+  # Bazel's latest release candidate, weekly, in every workspace `test` runs:
+  # an upstream change that breaks us shows before its release. It also turns
+  # on the incompatible flags no released Bazel we run has yet, so their flip
+  # shows here first. A red run here never blocks a merge.
   bazel-rc:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     continue-on-error: true
@@ -273,7 +276,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        folder: [".", "e2e/smoke"]
+        folder:
+          - "."
+          - "e2e/smoke"
+          - "e2e/examples"
+          - "e2e/root_settings"
+          - "e2e/custom_sdk"
+          - "overhead"
+          - "dev"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
@@ -284,7 +294,7 @@ jobs:
           repository-cache: true
       - name: Bazel's latest release candidate — ${{ matrix.folder }}
         working-directory: ${{ matrix.folder }}
-        run: bazel test --lockfile_mode=off --test_output=errors //...
+        run: bazel test --lockfile_mode=off --incompatible_fail_on_unknown_output_groups --test_output=errors //...
   # Workspaces that are expected to fail at module resolution.
   # Validates that rules_dart produces the correct error messages.
   expected-failure:
@@ -351,13 +361,108 @@ jobs:
       - name: toolchain_pin_conflict — expect a root pin below a dependency's request to fail, naming it
         working-directory: e2e/failures/toolchain_pin_conflict
         run: |
-          if out=$(bazel build @dart_toolchains//:all 2>&1); then
+          if out=$(bazel build //... 2>&1); then
             echo "ERROR: build should have failed: newer_dep requests a newer Dart SDK than the root pins"
             exit 1
           fi
           echo "$out" | grep -q "newer_dep requests 99.0.0"
           echo "$out" | grep -q "allow_upgrade_by_dependencies = True"
           echo "OK: expected toolchain upgrade refusal detected"
+      - name: custom_sdk — expect each declared Dart SDK a build cannot use to fail when used, saying what is wrong and the fix
+        working-directory: e2e/failures/custom_sdk
+        run: |
+          # The SDK a build chooses by flag, then what its failure must say.
+          expect() {
+            local sdk=$1; shift
+            local flag=()
+            [ -n "$sdk" ] && flag=("--@rules_dart//dart:sdk=$sdk")
+            if out=$(bazel build "${target[@]}" "${flag[@]}" 2>&1); then
+              echo "ERROR: building with SDK '$sdk' should have failed"
+              exit 1
+            fi
+            for text in "$@"; do
+              echo "$out" | grep -qF -- "$text" || { echo "$out"; echo "ERROR: '$sdk' did not say: $text"; exit 1; }
+            done
+          }
+          target=(//:value_test)
+          # No flag: the SDK dart.use_sdk chooses.
+          expect "" 'Dart SDK "older_than_requested" is 3.14.0' "newer_dep requests 3.14.1" "dart.use_sdk"
+          expect below_minimum 'Dart SDK "below_minimum" is 3.12.2' "at least Dart 3.13.0"
+          expect no_checksums 'Dart SDK "no_checksums" has no checksum for its' "sdk_sha256"
+          expect no_source_checksum 'Dart SDK "no_source_checksum" has no checksum for the source archive' 'source_sha256 = "<sha256>"' "Or build without it"
+          expect no_path 'Dart SDK "no_path" is a checkout, and DART_CHECKOUT is not set' "--repo_env=DART_CHECKOUT="
+          expect old_files 'Dart SDK "old_files" is 3.13.0' "newer_dep requests 3.14.1"
+          expect not_an_sdk 'Dart SDK "not_an_sdk"' "it has no bin/dart"
+          expect no_host 'Dart SDK "no_host" has no SDK for' 'dart.custom_sdk(name = "no_host"'
+          expect nonexistent "names no Dart SDK the root module declares" "dart, no_checksums"
+          # With no execution platform it can serve, the build says why for this
+          # machine, the last one tried, not for the one tried first.
+          target=(//:value_test --extra_execution_platforms=//:windows_arm64)
+          expect no_checksums 'Dart SDK "no_checksums" has no checksum for its' "sdk_sha256"
+          if echo "$out" | grep -qF 'windows-arm64'; then echo "$out"; echo "ERROR: named the first platform tried, not this machine"; exit 1; fi
+          expect no_host 'Dart SDK "no_host" has no SDK for' 'dart.custom_sdk(name = "no_host"'
+          if echo "$out" | grep -qF 'windows-arm64'; then echo "$out"; echo "ERROR: named the first platform tried, not this machine"; exit 1; fi
+          expect no_path 'Dart SDK "no_path" is a checkout, and DART_CHECKOUT is not set'
+          target=(//:uses_unsupplied)
+          expect dart "nothing supplies"
+          # A path that is no checkout: what is set is checked too.
+          target=(//:value_test "--repo_env=DART_CHECKOUT=$PWD")
+          expect no_path 'Dart SDK "no_path"' "has no pkg/kernel/pubspec.yaml"
+          target=(//:value_program --platforms=//:linux_riscv64)
+          expect no_cross_tools 'Dart SDK "no_cross_tools" cannot cross-compile' 'dart.custom_sdk(name = "no_cross_tools", cross_tools = {'
+          target=(//:value_program --platforms=//:linux_riscv64)
+          expect no_runtime 'Dart SDK "no_runtime" has no checksum for' 'cross_tools_sha256 = {"dartaotruntime_linux_riscv64"'
+          # Before Dart 3.15, a cross `aot-snapshot` wants the runtime too.
+          target=(//:value_snapshot --platforms=//:linux_riscv64)
+          expect no_runtime 'Dart SDK "no_runtime" has no checksum for' 'dartaotruntime_linux_riscv64'
+          # A cross compile by any rule stops the same way, with no output.
+          target=(@rules_dart//dart/pub --platforms=//:linux_riscv64)
+          expect no_runtime 'Dart SDK "no_runtime" has no checksum for' 'dartaotruntime_linux_riscv64'
+          # The tools built from an SDK's source stop what runs them, and only that.
+          target=(//:value_analysis --@rules_dart//dart:outline_kernel=false)
+          expect no_source_checksum 'the summary analyzer is built from' '--@rules_dart//dart:analysis_summaries=false'
+          expect no_cross_tools 'has no source to build the summary analyzer from' 'source = ...'
+          target=(//:value_test)
+          expect no_cross_tools 'has no source to build the outline stripper from' 'source = ...'
+          # Source the outline stripper cannot be built on stops what runs it, saying why.
+          expect source_refused 'Dart SDK "source_refused" cannot build the outline stripper' 'pub would refuse' '--@rules_dart//dart:outline_kernel=false'
+          expect source_missing_dep 'Dart SDK "source_missing_dep" cannot build the outline stripper' 'its pkg/kernel depends on' not_among_rules_dart_packages
+          expect source_old_dep 'Dart SDK "source_old_dep" cannot build the outline stripper' 'its pkg/kernel needs' 'collection' '>=99.0.0'
+          expect source_reaches_own_package 'Dart SDK "source_reaches_own_package" cannot build the outline stripper' 'its pkg/kernel depends on' source_gen "rules_dart's own" _fe_analyzer_shared
+          for sdk in no_source_checksum no_cross_tools source_refused source_missing_dep source_old_dep source_reaches_own_package; do
+            bazel build //:value_program "--@rules_dart//dart:sdk=$sdk"
+          done
+          # A pubspec pub refuses stops the builds reaching it, and no other.
+          target=(@refused_pubspecs//:bad_yaml)
+          expect dart 'pub would refuse the pubspec of pub package "bad_yaml"'
+          target=(@refused_pubspecs//:wrong_name)
+          expect dart 'pub would refuse the pubspec of pub package "wrong_name"' "doesn't match expected name"
+          target=(@refused_pubspecs//:reaches_refused)
+          expect dart 'pub would refuse the pubspec of pub package "wrong_name"'
+          target=(@refused_pubspecs//:reaches_mapped)
+          expect dart 'pub would refuse the pubspec of pub package "mapped"'
+          # So does a path package that cannot be built.
+          target=(@refused_pubspecs//:not_checked_out)
+          expect dart 'Pub package "not_checked_out" 1.0.0 cannot be built' 'does not exist' 'or name the package in'
+          target=(@refused_pubspecs//:reaches_not_checked_out)
+          expect dart 'Pub package "not_checked_out" 1.0.0 cannot be built'
+          target=(@refused_pubspecs//:empty_checkout)
+          expect dart 'Pub package "empty_checkout" 1.0.0 cannot be built' 'has no pubspec.yaml'
+          target=(@refused_pubspecs//:builds_itself)
+          expect dart 'has a Bazel build of its own (lib/BUILD.bazel)'
+          target=(@refused_pubspecs//:reaches_no_pubspec)
+          expect dart 'no_pubspec/pubspec.yaml does not exist'
+          bazel build --@rules_dart//dart:sdk=dart @refused_pubspecs//:fine //refused_pubspecs/no_pubspec
+          echo "OK: every unusable SDK refused, saying why"
+      - name: old_sdk_doc_import — expect analysis with Dart 3.13 to say which comment_references are false
+        working-directory: e2e/failures/old_sdk_doc_import
+        run: |
+          if out=$(bazel build //doc 2>&1); then
+            echo "ERROR: build should have failed: the analyzer reports a reference through a doc import"
+            exit 1
+          fi
+          echo "$out" | grep -qF "'Other' comes from the doc import of" || { echo "$out"; exit 1; }
+          echo "OK: the false comment_references explained"
       - name: root_settings/pub_unsupplied — expect a dependency on an unsupplied sdk package to fail
         working-directory: e2e/root_settings
         run: |
@@ -367,11 +472,11 @@ jobs:
           fi
           echo "$out" | grep -q "nothing supplies \`petitparser\`"
           echo "OK: expected unsupplied dependency detected"
-      - name: pub_lock_resolve_invalid — expect unnamed, twice-named and wrongly named packages, and path packages no lock can hold, to fail, naming each
+      - name: pub_lock_resolve_invalid — expect unnamed, twice-named and wrongly named packages to fail, naming each
         working-directory: e2e/failures/pub_lock_resolve_invalid
         run: |
           if out=$(bazel build @pub//:path 2>&1); then
-            echo "ERROR: build should have failed: models named nowhere, utils twice, http not locked, path not a path package, far absolute, outside outside the workspace"
+            echo "ERROR: build should have failed: models named nowhere, utils twice, http not locked, path not a path package"
             exit 1
           fi
           echo "$out" | grep -qF "it lists \`models\` as a \`path\` package"
@@ -379,8 +484,6 @@ jobs:
           echo "$out" | grep -qF "\`resolve\` maps \`http\`, which the lock does not list"
           echo "$out" | grep -qF "\`build_from_pubspec\` names \`path\`, which the lock does not list as \`path\`"
           echo "$out" | grep -qF "\`utils\` is named in \`build_from_pubspec\` and \`ignored\`"
-          echo "$out" | grep -qF "\`build_from_pubspec\` names \`far\` (/opt/far), whose directory the lock gives by an absolute path"
-          echo "$out" | grep -qF "\`build_from_pubspec\` names \`outside\` (../outside), whose directory is outside the repository"
           echo "OK: expected resolve errors detected"
       - name: pub/path — expect a path package with a BUILD file of its own to be refused
         working-directory: e2e/examples
@@ -398,7 +501,7 @@ jobs:
         working-directory: e2e/failures/pub_lock_refused
         run: |
           if out=$(bazel build @one//:meta 2>&1); then
-            echo "ERROR: build should have refused path's and meta's missing sha256, foo's abbreviated resolved-ref, and the locks' disagreements on tuple, bar and baz"
+            echo "ERROR: build should have refused path's and meta's missing sha256, foo's abbreviated resolved-ref, the locks' disagreements on tuple, bar, baz, registry, from_outside, from_path and from_path_git, and the declaration of runfiles"
             exit 1
           fi
           echo "$out" | grep -qF 'No sha256 is pinned for pub package "path"'
@@ -408,6 +511,19 @@ jobs:
           echo "$out" | grep -qF 'Package "tuple" 2.0.2 has conflicting sha256 digests'
           echo "$out" | grep -qF 'Git package "bar" is locked differently across lock files'
           echo "$out" | grep -qF 'Package "baz" is a git package in'
+          echo "$out" | grep -qF 'Package "registry" is fetched from different registries'
+          echo "$out" | grep -qF 'https://private.example.com, from the lock'
+          if echo "$out" | grep -qF 'Package "renamed"'; then
+            echo "ERROR: pub.dev and pub.dartlang.org are one registry"
+            exit 1
+          fi
+          echo "$out" | grep -qF 'Package "from_outside" is built from different directories'
+          echo "$out" | grep -qF 'Package "from_path" is built from @@//from_path by the lock'
+          echo "$out" | grep -qF 'lists it as a hosted package'
+          echo "$out" | grep -qF 'Package "from_path_git" is built from @@//from_path_git by the lock'
+          echo "$out" | grep -qF 'lists it as a git package'
+          echo "$out" | grep -qF '(in the root module) names a package rules_dart publishes'
+          echo "$out" | grep -qF '@rules_dart//dart/runfiles'
           echo "OK: every refusal named in one failure"
       - name: fixtures/pub_missing_dep — expect a pub.package() whose pubspec depends on an unsupplied package to be refused
         working-directory: e2e/examples
@@ -418,7 +534,7 @@ jobs:
           fi
           bazel build @provider//:provider 2>&1 | grep -q "nothing supplies \`flutter\`"
           echo "OK: unsupplied pub.package() dependency refused"
-      - name: fixtures/pub_cycle_refused — expect an undeclared cycle, a stale declaration, part of a cycle and a cycle through a resolve target to be refused
+      - name: fixtures/pub_cycle_refused — expect an undeclared cycle, a stale declaration, part of a cycle and a cycle through a resolve target, inside or outside the workspace, to be refused
         working-directory: e2e/examples
         run: |
           for target in left old_a tri_a theirs; do
@@ -431,6 +547,7 @@ jobs:
           bazel build @refused_cycles//:old_a 2>&1 | grep -qF "\`old_a\` is in no cycle"
           bazel build @refused_cycles//:tri_a 2>&1 | grep -qF 'pub.cycle(packages = ["tri_a", "tri_b", "tri_c"])'
           bazel build @refused_cycles//:theirs 2>&1 | grep -qF "move it from \`resolve\` to \`build_from_pubspec\`"
+          bazel build @refused_cycles//:outside_theirs 2>&1 | grep -qF "move it from \`resolve\` to \`build_from_pubspec\`"
           bazel build //fixtures/pub_cycle_refused/mine 2>&1 | grep -qF 'pub.cycle(packages = ["mine", "theirs"])'
           echo "OK: undeclared and misdeclared cycles refused"
       - name: kernel_source_refused — expect a dart_kernel_source naming both or neither of dart_version and path, or a path that is no checkout, to be refused
@@ -444,7 +561,7 @@ jobs:
           done
           bazel build @both//:outline_tool 2>&1 | grep -q "give exactly one of \`dart_version\` and \`path\`, both were given"
           bazel build @neither//:outline_tool 2>&1 | grep -q "give exactly one of \`dart_version\` and \`path\`, neither was"
-          bazel build @not_a_checkout//:outline_tool 2>&1 | grep -q "/usr/pkg/kernel/pubspec.yaml does not exist"
+          bazel build @not_a_checkout//:outline_tool 2>&1 | grep -q "/usr has no pkg/kernel/pubspec.yaml"
           echo "OK: dart_kernel_source misuse refused"
       # A link hook that refuses the program's recorded uses fails the build,
       # and its own message reaches the user.
@@ -557,8 +674,18 @@ jobs:
           check //fixtures/analysis_failure/import_check/spellings:file_uri_bin "imports 'file:///tmp/undeclared.dart', a file: URI"
           check //fixtures/analysis_failure/import_check/spellings:unheld_part "has the part 'unheld_part.g.dart'"
           echo "OK: undeclared spellings refused"
+      - name: analysis_failure/doc_import — expect a doc import of a file a fetched package lacks to be reported
+        working-directory: e2e/examples
+        run: |
+          if out=$(bazel test //fixtures/analysis_failure/doc_import 2>&1); then
+            echo "ERROR: build should have failed: the doc import names no file of the package"
+            exit 1
+          fi
+          echo "$out" | grep -qF "Target of URI doesn't exist: 'package:path/misspelt.dart'" || { echo "$out"; exit 1; }
+          echo "OK: the misspelt doc import reported"
       # A library, and a test whose support library carries the edge, each
-      # listing a dependency none of its files imports.
+      # listing a dependency none of its files imports; and a test listing a
+      # source its main never loads.
       - name: analysis_failure — expect the unused-dependency check to name the edge
         working-directory: e2e/examples
         run: |
@@ -587,6 +714,9 @@ jobs:
             echo "ERROR: a dependency the rule's bootstrap imports was reported"
             exit 1
           fi
+          check //fixtures/analysis_failure/import_check/unused:unreached_test "//fixtures/analysis_failure/import_check/unused:unreached_test: main never imports, exports or includes as a part these srcs"
+          check //fixtures/analysis_failure/import_check/unused:unreached_test "  fixtures/analysis_failure/import_check/unused/test/unreached_support.dart"
+          check //fixtures/analysis_failure/import_check/unused:unreached_group_test "  :unreached_group (fixtures/analysis_failure/import_check/unused/test/unreached_group_a.dart, fixtures/analysis_failure/import_check/unused/test/unreached_support.dart)"
           echo "OK: unused dependencies reported"
       # Each target in e2e/examples/fixtures/analysis_failure is expected red
       # under the `dart_analyze` aspect, which `.bazelrc` applies under `bazel
@@ -837,6 +967,9 @@ jobs:
       - name: pub/git — expect host git config to reach only the fetch, by-id refusal included
         working-directory: e2e/examples
         run: dart pub/git/check_host_config.dart
+      - name: pub/vendor — expect vendored pub packages to build in a new output base
+        working-directory: e2e/examples
+        run: dart pub/vendor/check_vendor.dart
   # `dart compile kernel` rejects `--enable-asserts`, so dbg-mode flags are
   # chosen per compile mode. examples' hello_world builds all four dart_binary
   # modes; dart_test exercises the kernel test path end-to-end.
@@ -899,6 +1032,29 @@ jobs:
       - name: Query the whole published module from a consumer
         working-directory: e2e/examples
         run: bazel query "@rules_dart//..."
+  # Windows on Arm is a host with its own Dart SDK. The reusable `test` job has
+  # no runner for it, so what a project does on one runs here: reading pub
+  # packages, analysis, compiled programs, cross-compiling, and the fixers.
+  windows-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}
+          repository-cache: true
+      - name: Smoke tests on Windows arm64
+        working-directory: e2e/smoke
+        run: bazel test --test_output=errors //...
+      - name: Pub packages, analysis, compiled programs and cross-compiling on Windows arm64
+        working-directory: e2e/examples
+        run: bazel test --test_output=errors //pub/... //analysis/... //hello_world/... //cross_compile/...
+      - name: The fixers on Windows arm64
+        working-directory: e2e/examples
+        run: bazel run //fix/write_back
   # `bazel run @rules_dart//dart/fix` and `@rules_dart//dart/format` write into
   # the source tree, from a `bazel build` they run themselves, so no test can
   # run them. Each check runs them over its workspace's fixtures and puts the
@@ -943,6 +1099,137 @@ jobs:
         run: bazel run //tool:pub_locks
       - name: bazelrc preset
         run: bazel run @overhead//preset -- --check
+  # `bazel fetch --all` and an untargeted `bazel vendor` take every repository,
+  # those of SDKs this machine cannot use and of pub packages that cannot be
+  # built among them: declaring either must not break them. The workspace
+  # declares one of each kind. Everything goes on the runner's large disk, as
+  # the two hold the toolchains of every host twice.
+  fetch-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: e2e/failures/custom_sdk
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+      - name: Put Bazel's files on the large disk
+        run: |
+          sudo mkdir /mnt/bazel
+          sudo chown "$USER" /mnt/bazel
+          {
+            echo 'startup --output_user_root=/mnt/bazel/root'
+            echo 'common --repository_cache=/mnt/bazel/repository_cache'
+          } > .bazelrc.user
+      - name: bazel fetch --all
+        run: bazel fetch --all
+      - name: bazel vendor, then build from what it vendored
+        run: |
+          vendor=/mnt/bazel/vendor
+          bazel vendor --vendor_dir=$vendor
+          # A checkout is one machine's, so it is not vendored; the rest is.
+          if compgen -G "$vendor/*+no_path_*" > /dev/null; then
+            echo "ERROR: bazel vendor took the repositories of a checkout"
+            exit 1
+          fi
+          # What depends on the machine is made by whichever uses the directory.
+          if compgen -G "$vendor/*+dart_host_toolchains" > /dev/null || compgen -G "$vendor/*+pubspec_reader-*" > /dev/null; then
+            echo "ERROR: bazel vendor froze this machine's toolchains or pubspec reader"
+            exit 1
+          fi
+          compgen -G "$vendor/*+no_host_macos-x64" > /dev/null
+          bazel build --vendor_dir=$vendor --@rules_dart//dart:sdk=dart //:value_test
+          if out=$(bazel build --vendor_dir=$vendor --@rules_dart//dart:sdk=no_path //:value_test 2>&1); then
+            echo "ERROR: building with no_path should have failed"
+            exit 1
+          fi
+          echo "$out" | grep -qF 'Dart SDK "no_path" is a checkout, and DART_CHECKOUT is not set' || { echo "$out"; exit 1; }
+          # A package that cannot be built fails what uses it.
+          if out=$(bazel build --vendor_dir=$vendor --@rules_dart//dart:sdk=dart @refused_pubspecs//:not_checked_out 2>&1); then
+            echo "ERROR: building not_checked_out should have failed"
+            exit 1
+          fi
+          echo "$out" | grep -qF 'Pub package "not_checked_out" 1.0.0 cannot be built' || { echo "$out"; exit 1; }
+          # So does one outside the workspace, by either kind of path.
+          for missing in outside_absent absolute_absent; do
+            if out=$(bazel build --vendor_dir=$vendor --@rules_dart//dart:sdk=dart @refused_pubspecs//:$missing 2>&1); then
+              echo "ERROR: building $missing should have failed"
+              exit 1
+            fi
+            echo "$out" | grep -qF "Pub package \"$missing\" 1.0.0 cannot be built" || { echo "$out"; exit 1; }
+          done
+          # A path package is the checkout's or this machine's: it is not
+          # vendored, inside the workspace or outside it, and the build keeps
+          # following its directory. What plans with it is vendored.
+          for local in fine outside_greeting absolute_absent mapped; do
+            if compgen -G "$vendor/*+dart_pub__$local" > /dev/null; then
+              echo "ERROR: bazel vendor froze path package $local"
+              exit 1
+            fi
+          done
+          compgen -G "$vendor/*+dart_pub_lib__fine" > /dev/null
+          bazel build --vendor_dir=$vendor --@rules_dart//dart:sdk=dart @refused_pubspecs//:fine @refused_pubspecs//:outside_greeting
+          sources() {
+            bazel query --vendor_dir=$vendor 'kind("source file", deps(@refused_pubspecs//:outside_greeting))' 2>/dev/null
+          }
+          sources | grep -qF 'lib/outside_greeting.dart'
+          added=../../outside_packages/outside_greeting/lib/added.dart
+          echo 'const added = 1;' > $added
+          found=$(sources)
+          rm $added
+          echo "$found" | grep -qF 'lib/added.dart' || { echo "ERROR: a file added outside the workspace did not reach the build"; exit 1; }
+  # `dart.checkout` as the README sets it up: `--repo_env=DART_CHECKOUT` naming
+  # a directory laid out as a dart-lang/sdk checkout with an SDK built in it. The
+  # directory is the stand-in `e2e/custom_sdk` builds from repositories, since
+  # building the SDK here would take hours: see `standin_checkout.bzl` for what
+  # that cannot show. On Linux x86-64 the cross tests have nothing to do.
+  checkout-from-env:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
+        with:
+          cache-version: ${{ env.CACHE_VERSION }}
+          bazelisk-cache: true
+          disk-cache: ${{ github.job }}-${{ strategy.job-index }}
+          repository-cache: true
+      - name: The SDK DART_CHECKOUT names
+        working-directory: e2e/custom_sdk
+        run: |
+          bazel fetch --repo=@standin_checkout
+          checkout="$(bazel info output_base)/external/+standin_checkout+standin_checkout"
+          bazel test --test_output=errors --skip_incompatible_explicit_targets --repo_env=DART_CHECKOUT="$checkout" \
+            //:from_env_sdk_test //:from_env_analysis_test //:from_env_cross_test //:from_env_aot_cross_test
+      # Laying out a cross-compiling SDK copies its executables without Bazel's
+      # downloader, which this flag or a restrictive configuration stops. The
+      # output base is fresh so the repositories are made here; what they fetch
+      # comes from the repository cache the step above filled.
+      # The `dart` release is neither what this workspace builds with nor needed
+      # by anything else here, so the reader is what would fetch it.
+      - name: The pubspec reader compiles with the SDK dart.use_sdk names
+        working-directory: e2e/custom_sdk
+        run: |
+          base="$RUNNER_TEMP/pubspec_reader"
+          bazel --output_base="$base" build @rules_dart//dart/kernel_list:all
+          repos=$(ls "$base/external")
+          echo "$repos" | grep -qE '^rules_dart\+\+dart\+pubspec_reader-' || { echo "ERROR: nothing read a pubspec"; exit 1; }
+          if echo "$repos" | grep -E '^rules_dart\+\+dart\+dart_(linux|macos|windows)-'; then
+            echo "ERROR: the pubspec reader fetched the dart release"
+            exit 1
+          fi
+      - name: A custom SDK cross-compiles with downloads disabled
+        working-directory: e2e/custom_sdk
+        run: |
+          bazel --output_base="$RUNNER_TEMP/no_downloads" test --test_output=errors \
+            --skip_incompatible_explicit_targets --repository_disable_download //:from_repositories_cross_test
   # The jobs below `conclusion` needs are every job that must pass, and some
   # job runs in every workspace.
   ci-config:
@@ -985,10 +1272,13 @@ jobs:
       - worker-sandboxing
       - bazel-floor
       - expected-failure
+      - fetch-all
+      - checkout-from-env
       - pub-archive-links
       - dbg-mode
       - dev-tests
       - consumer-query
+      - windows-arm64
       - write-back
       - lockfiles
       - ci-config

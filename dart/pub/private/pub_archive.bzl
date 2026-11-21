@@ -1,9 +1,9 @@
 """Fetches a hosted pub package's archive into a repository.
 
-Every repository rule that materialises a hosted pub package — `pub_lock_package`
-(`pub.from_lock()`), `pub_package` (`pub.package()`) and rules_flutter's
-`flutter_pub_package` — fetches through `fetch_pub_archive`, so one package
-version is fetched and laid out the same way whichever rule asks for it.
+Every repository that materialises a hosted pub package fetches through
+`fetch_pub_archive` (`pub_archive_files`, for `pub.from_lock()` and
+`pub.package()`; rules_flutter's `flutter_pub_package`), so one package version
+is fetched and laid out the same way whichever rule asks for it.
 """
 
 visibility("//dart/...")
@@ -27,7 +27,7 @@ _UTF8_LOCALE = "C.UTF-8"
 _UTF8_LOCALE_MACOS = "en_US.UTF-8"
 
 def _host_bsdtar(rctx):
-    """The host's bsdtar; only its repository is fetched."""
+    """The host's bsdtar, or None for a host it has no build for; only its repository is fetched."""
     name = rctx.os.name.lower()
     arch = rctx.os.arch.lower()
     if name.startswith("mac"):
@@ -45,12 +45,7 @@ def _host_bsdtar(rctx):
     else:
         cpu = arch
     host = os + "_" + cpu
-    if host not in _BSDTAR:
-        fail("rules_dart extracts pub packages with tar.bzl's bsdtar, which has no build for this host ({} {}).".format(
-            rctx.os.name,
-            rctx.os.arch,
-        ))
-    return rctx.path(_BSDTAR[host])
+    return rctx.path(_BSDTAR[host]) if host in _BSDTAR else None
 
 def tar_entry_leaves_package(entry):
     """Whether a tar entry's name is absolute or climbs out through `..`.
@@ -207,8 +202,13 @@ def fetch_pub_archive(rctx, package_name, version, sha256, base_url = "https://p
     the package are deleted, as pub does.
 
     The result depends only on the arguments, so a rule calling this can return
-    `rctx.repo_metadata(reproducible = True)` when nothing else it does reads
-    the host.
+    `rctx.repo_metadata(reproducible = <what this returns>)` when nothing else it
+    does reads the host.
+
+    Every host with a Dart SDK has a bsdtar. On one without, nothing extracts and
+    the repository holds just a `pubspec.yaml` naming the package, so that it
+    still fetches for `bazel fetch --all` and `bazel vendor`: nothing can read or
+    build it there, and whatever needs it fails, saying the host has no Dart SDK.
 
     Args:
         rctx: The `repository_ctx`.
@@ -216,15 +216,21 @@ def fetch_pub_archive(rctx, package_name, version, sha256, base_url = "https://p
         version: The package version.
         sha256: The archive's SHA-256, as pubspec.lock records it.
         base_url: The hosted registry, as pubspec.lock's `description.url`.
+
+    Returns:
+        Whether the package was extracted.
     """
     check_pub_archive_sha256(package_name, version, sha256, "@" + rctx.name, base_url = base_url)
+    tar = _host_bsdtar(rctx)
+    if not tar:
+        rctx.file("pubspec.yaml", "name: {}\n".format(package_name))
+        return False
     url = "{base}/packages/{name}/versions/{version}.tar.gz".format(
         base = base_url.rstrip("/"),
         name = package_name,
         version = version,
     )
     rctx.download(url = url, output = _ARCHIVE, sha256 = sha256)
-    tar = _host_bsdtar(rctx)
     env = {"LC_ALL": _UTF8_LOCALE_MACOS if rctx.os.name.lower().startswith("mac") else _UTF8_LOCALE}
 
     def run(args, what):
@@ -255,3 +261,4 @@ def fetch_pub_archive(rctx, package_name, version, sha256, base_url = "https://p
     run(["-xzf", _ARCHIVE], "Extracting")
     rctx.delete(_ARCHIVE)
     drop_escaping_links(rctx)
+    return True

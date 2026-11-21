@@ -2,13 +2,13 @@
 
 load("//dart/ext:registry.bzl", "curated_code_assets", "curated_cycles")
 load("//dart/pub:pub_graph.bzl", "cycle_declaration", "cycle_declarations_error")
-load("//dart/pub:pub_lock_package.bzl", "pub_lock_git_package", "pub_lock_package", "pub_lock_path_package", "pub_lock_resolved_pubspec")
+load("//dart/pub:pub_lock_package.bzl", "pub_archive_files", "pub_files_label", "pub_git_files", "pub_lock_disagreement_errors", "pub_lock_entry", "pub_lock_mapping_error", "pub_lock_package", "pub_lock_path_package", "pub_lock_resolved_pubspec")
 load("//dart/pub:pub_versions.bzl", "CHECK_LEVELS", "pub_version_request", "select_pub_version")
 load("//dart/pub:yaml_parser.bzl", "parse_pubspec_lock")
 load("//dart/pub/private:pub_archive.bzl", "pub_archive_sha256_error")
-load("//dart/pub/private:pub_lock_checks.bzl", "git_disagreement_error", "git_lock_package", "lock_mapping_error", "path_packages", "pub_command", "resolved_packages", "resolved_pubspecs", "source_disagreement_errors")
+load("//dart/pub/private:pub_lock_checks.bzl", "path_packages", "published_declaration_errors", "published_here_targets", "resolved_packages", "resolved_pubspecs")
 load("//dart/pub/private:pub_lock_hub.bzl", "pub_lock_hub")
-load("//dart/pub/private:pub_lock_library.bzl", "index_repo", "library_repo", "pub_lock_ignored", "pub_lock_index", "pub_lock_library", "pub_lock_resolved", "source_repo")
+load("//dart/pub/private:pub_lock_library.bzl", "files_repo", "index_label", "index_repo", "library_repo", "pub_lock_ignored", "pub_lock_index", "pub_lock_library", "pub_lock_resolved", "source_label", "source_repo")
 load("//dart/pub/private:pub_settings.bzl", "root_only_settings")
 
 _SPOKE_PREFIX = "dart_pub"
@@ -16,7 +16,9 @@ _SPOKE_PREFIX = "dart_pub"
 _package = tag_class(
     attrs = {
         "name": attr.string(
-            doc = "The pub.dev package name (also used as the repository name).",
+            doc = "The pub.dev package name (also used as the repository name). A package " +
+                  "rules_dart publishes (`runfiles`) cannot be declared: depend on its target " +
+                  "(`@rules_dart//dart/runfiles`), which is what a build holds.",
             mandatory = True,
         ),
         "version": attr.string(
@@ -112,7 +114,10 @@ _from_lock = tag_class(
                   "lock's directory, holds the package, and its `pubspec.yaml`, `lib/`, " +
                   "`hook/` and license file are served from there. For a package with no " +
                   "Bazel build of its own; one with a `BUILD` file is mapped with `resolve`. " +
-                  "Two locks building one package must name the same directory.",
+                  "The package is never vendored: its files are the checkout's or this " +
+                  "machine's. The directory may be outside the repository, by an absolute " +
+                  "path or one leaving it, and the build then depends on this machine. Two " +
+                  "locks building one package must name the same directory.",
             default = [],
         ),
         "ignored": attr.string_dict(
@@ -127,7 +132,9 @@ _from_lock = tag_class(
           "dependencies its pubspec states and aliased in the hub `name`. `hosted` and " +
           "`git` packages are fetched; every `path` package is named in `resolve`, " +
           "`build_from_pubspec` or `ignored`; an `sdk` package is skipped unless `resolve` " +
-          "maps it.",
+          "maps it. pub.dev's `runfiles` is published from `@rules_dart//dart/runfiles`, " +
+          "so it is that target, whichever version the lock names, unless `resolve` maps " +
+          "it elsewhere.",
 )
 
 _settings = tag_class(
@@ -213,20 +220,22 @@ def _declarations(ctx, root_unversioned):
             declared[name] = decls
     return struct(declared = declared, overridden = overridden)
 
-def _select_versions(name, decls, entries, url, check):
+def _select_versions(name, decls, entries, check):
     """Picks a hosted package's version from its declarations and lock entries.
+
+    Each request carries its own registry: a declaration's is pub.dev, and a
+    lock entry's is the one it names, so two that disagree are refused.
 
     Args:
       name: The package.
       decls: Its `pub.package()` declarations, as `_declarations` gives them.
       entries: Its hosted lock entries.
-      url: The registry its lock entries name, or pub.dev.
       check: The root's `check_direct_dependencies`.
 
     Returns:
-      `struct(version, sha256, url, declared, warnings, error)`: the winner,
-      whether a declaration states it (its repository is then named for the
-      package), and the messages.
+      `struct(version, sha256, url, declared, warnings, error)`: the winning
+      request's version, digest and registry, whether a declaration states it
+      (its repository is then named for the package), and the messages.
     """
     requests = [
         pub_version_request(
@@ -241,11 +250,11 @@ def _select_versions(name, decls, entries, url, check):
         pub_version_request(
             version = e.version,
             sha256 = e.sha256,
-            url = url,
+            url = e.url,
             is_root = e.is_root,
             where = e.where,
-            upgrade = pub_command("upgrade", e.lock_file, [name]),
-            refresh = pub_command("get", e.lock_file),
+            upgrade = e.upgrade,
+            refresh = e.refresh,
         )
         for e in entries
     ]
@@ -323,6 +332,17 @@ def _cycles(ctx, fetched, resolved_targets, ignored):
         ],
     )
 
+def _mapping_error(lock):
+    tag = lock.tag
+    return pub_lock_mapping_error(
+        'pub.from_lock(name = "%s", lock = "%s")' % (tag.name, tag.lock),
+        tag.lock,
+        lock.packages,
+        resolve = tag.resolve,
+        build_from_pubspec = tag.build_from_pubspec,
+        ignored = tag.ignored,
+    )
+
 def _pub_impl(ctx):
     # The root's settings, and the packages whose hooks it declared
     # irrelevant: a package is one repository however many tags name it, so
@@ -341,8 +361,8 @@ def _pub_impl(ctx):
     locks = []
     for mod in ctx.modules:
         for lock_tag in mod.tags.from_lock:
-            lock_pkgs = parse_pubspec_lock(ctx.read(lock_tag.lock), lock_tag.lock)
-            locks.append(struct(module = mod, tag = lock_tag, packages = lock_pkgs))
+            lock = parse_pubspec_lock(ctx.read(lock_tag.lock), lock_tag.lock)
+            locks.append(struct(module = mod, tag = lock_tag, packages = lock.packages))
 
     # Every module's `pub.package()` requests, and the ones the root's lock
     # supplies instead.
@@ -369,18 +389,26 @@ def _pub_impl(ctx):
             else:
                 pinned.setdefault(name, []).append(d)
 
+    # A declaration of a package rules_dart publishes would not be honoured.
+    where_declared = {}
+    for mod in ctx.modules:
+        for pkg in mod.tags.package:
+            where_declared.setdefault(pkg.name, []).append("the root module" if mod.is_root else "module `%s`" % mod.name)
+    errors.extend(published_declaration_errors(where_declared))
+
     # Each lock's own `resolve`, `build_from_pubspec` and `ignored`. Until
     # they are right, what serves a lock's packages is unknown.
-    mapping_errors = [e for e in [lock_mapping_error(lock) for lock in locks] if e]
+    mapping_errors = [e for e in [_mapping_error(lock) for lock in locks] if e]
     if mapping_errors:
         fail("\n\n".join(errors + mapping_errors))
 
-    # Packages a workspace target serves, by `resolve`, and the `path`
-    # packages built from their pubspec or ignored. A package they disagree
-    # on is still served by one of them, so nothing below fetches it.
+    # Packages a target serves, by `resolve` or because rules_dart publishes
+    # them, and the `path` packages built from their pubspec or ignored. A
+    # package they disagree on is still served by one of them, so nothing below
+    # fetches it.
     mapped = resolved_packages(locks, declared)
-    resolved_targets = mapped.targets
-    paths = path_packages(locks, declared, resolved_targets)
+    resolved_targets = published_here_targets(locks, mapped.targets)
+    paths = path_packages(ctx, locks, declared, resolved_targets)
 
     # The mapped packages whose pubspec planning reads, to find a cycle
     # between one and pub packages, which no declaration can build.
@@ -403,6 +431,9 @@ def _pub_impl(ctx):
     # Git packages, each with the one commit every lock that lists it pins.
     git_registry = {}
 
+    # What each lock that counts says of a package, to compare across them.
+    lock_entries = {name: list(entries) for name, entries in paths.entries.items()}
+
     # Packages a lock lists that no repository is fetched for (SDK sources and
     # those pub does not know, unless mapped), with how the first such lock
     # lists each.
@@ -424,14 +455,22 @@ def _pub_impl(ctx):
 
         for name, info in lock.packages.items():
             # One `resolve` maps is that target, however the lock lists it.
-            if name in resolved_targets or name in paths.built or name in paths.ignored:
+            if name in resolved_targets or name in paths.ignored:
                 hub_packages[hub_name][name] = True
                 continue
+
+            # One built from its pubspec is that directory, so a lock fetching
+            # it from elsewhere disagrees, and is read only to say so.
+            source = info["source"]
+            built = name in paths.built
+            if built:
+                hub_packages[hub_name][name] = True
+                if source not in ("git", "hosted"):
+                    continue
 
             # A `pub.package()` supplies a package the lock lists from a source
             # with no version to compare (git, sdk); a hosted entry is one more
             # request for it.
-            source = info["source"]
             if name in declared and source != "hosted":
                 hub_packages[hub_name][name] = True
                 continue
@@ -443,48 +482,32 @@ def _pub_impl(ctx):
                 if root_unversioned[name] == "git":
                     hub_packages[hub_name][name] = True
                 continue
-            if source == "git":
-                hub_packages[hub_name][name] = True
-                git = git_lock_package(name, info, lock_tag)
-                errors.extend(git.errors)
-                if git.package:
-                    first = git_registry.setdefault(name, git.package)
-                    disagreement = git_disagreement_error(name, first, git.package)
-                    if disagreement:
-                        errors.append(disagreement)
-                continue
-            if source != "hosted":
+            if source not in ("git", "hosted"):
                 if source == "sdk":
                     skipped_sdk.append(name)
                 non_hosted.setdefault(name, "a `%s` package in %s" % (source, lock_tag.lock))
                 continue
 
             hub_packages[hub_name][name] = True
-
-            desc = info.get("description", {})
-            url = desc.get("url", "https://pub.dev")
-            version = info.get("version", "")
-            sha256 = desc.get("sha256", "")
-            error = pub_archive_sha256_error(
-                name,
-                version,
-                sha256,
-                str(lock_tag.lock),
-                rewrite = pub_command("get", lock_tag.lock),
-            )
-            if error:
-                # An entry that pins nothing requests nothing, so it is in no
-                # disagreement over digests.
-                errors.append(error)
+            read = pub_lock_entry(name, info, lock_tag.lock)
+            errors.extend(read.errors)
+            entry = read.entry
+            if not entry:
+                continue
+            lock_entries.setdefault(name, []).append(entry)
+            if built:
+                continue
+            if source == "git":
+                git_registry.setdefault(name, entry)
                 continue
             registry.setdefault(name, []).append(struct(
-                version = version,
-                sha256 = sha256,
-                url = url,
+                version = entry.version,
+                sha256 = entry.sha256,
+                url = entry.url,
                 is_root = mod.is_root,
                 where = _where_lock(mod, lock_tag.lock),
-                lock_label = str(lock_tag.lock),
-                lock_file = lock_tag.lock,
+                upgrade = entry.upgrade,
+                refresh = entry.refresh,
             ))
 
         if skipped_sdk:
@@ -500,7 +523,8 @@ def _pub_impl(ctx):
                 ),
             )
 
-    errors.extend(source_disagreement_errors(paths.built, git_registry, registry))
+    for name in sorted(lock_entries):
+        errors.extend(pub_lock_disagreement_errors(name, lock_entries[name]))
 
     # One version per hosted package: the highest request, a `pub.package()`
     # in any module or a lock entry, wins.
@@ -508,13 +532,12 @@ def _pub_impl(ctx):
     resolved = {}  # name -> the winning lock entry's version, digest and registry
     for name in sorted(declared.keys() + [n for n in registry if n not in declared]):
         entries = registry.get(name, [])
-        if not entries and name not in pinned:
+        if name in resolved_targets or (not entries and name not in pinned):
             continue
         selection = _select_versions(
             name,
             pinned.get(name, []),
             entries,
-            entries[0].url if entries else "https://pub.dev",
             settings.check,
         )
         if selection.error:
@@ -536,18 +559,23 @@ def _pub_impl(ctx):
     # so it is planned with the others and can be in a cycle with them. Its
     # library repository is named for it.
     for name, pkg in explicit.items():
-        pub_lock_package(
-            name = source_repo(_SPOKE_PREFIX, name),
+        pub_archive_files(
+            name = files_repo(_SPOKE_PREFIX, name),
             package_name = name,
             version = pkg.version,
             sha256 = pkg.sha256,
             base_url = pkg.url,
+        )
+        pub_lock_package(
+            name = source_repo(_SPOKE_PREFIX, name),
+            files = pub_files_label(files_repo(_SPOKE_PREFIX, name)),
             code_assets = curated_code_assets(name, pkg.version),
             ignore_hook = name in ignore_hooks,
         )
         pub_lock_library(
             name = name,
             package_name = name,
+            index = index_label(_SPOKE_PREFIX),
             spoke_prefix = _SPOKE_PREFIX,
         )
 
@@ -566,6 +594,7 @@ def _pub_impl(ctx):
     pub_lock_index(
         name = index_repo(_SPOKE_PREFIX),
         versions = fetched,
+        sources = {name: source_label(_SPOKE_PREFIX, name) for name in fetched.keys() + readable.keys()},
         explicit_packages = explicit_names,
         # An ignored package's library repository is where its dependents
         # look, as for a mapped one.
@@ -576,35 +605,45 @@ def _pub_impl(ctx):
         served = {name: str(pkg.target) for name, pkg in readable.items()},
     )
     for name, pkg in git_registry.items():
-        pub_lock_git_package(
-            name = source_repo(_SPOKE_PREFIX, name),
+        pub_git_files(
+            name = files_repo(_SPOKE_PREFIX, name),
             package_name = name,
             version = pkg.version,
             url = pkg.url,
             resolved_ref = pkg.resolved_ref,
             path = pkg.path,
             lock = pkg.lock,
+        )
+        pub_lock_package(
+            name = source_repo(_SPOKE_PREFIX, name),
+            files = pub_files_label(files_repo(_SPOKE_PREFIX, name)),
             code_assets = curated_code_assets(name, pkg.version),
             ignore_hook = name in ignore_hooks,
         )
         pub_lock_library(
             name = library_repo(_SPOKE_PREFIX, name),
             package_name = name,
+            index = index_label(_SPOKE_PREFIX),
             spoke_prefix = _SPOKE_PREFIX,
         )
     for name, pkg in resolved.items():
-        pub_lock_package(
-            name = source_repo(_SPOKE_PREFIX, name),
+        pub_archive_files(
+            name = files_repo(_SPOKE_PREFIX, name),
             package_name = name,
             version = pkg.version,
             sha256 = pkg.sha256,
             base_url = pkg.url,
+        )
+        pub_lock_package(
+            name = source_repo(_SPOKE_PREFIX, name),
+            files = pub_files_label(files_repo(_SPOKE_PREFIX, name)),
             code_assets = curated_code_assets(name, pkg.version),
             ignore_hook = name in ignore_hooks,
         )
         pub_lock_library(
             name = library_repo(_SPOKE_PREFIX, name),
             package_name = name,
+            index = index_label(_SPOKE_PREFIX),
             spoke_prefix = _SPOKE_PREFIX,
         )
 
@@ -613,7 +652,7 @@ def _pub_impl(ctx):
             name = source_repo(_SPOKE_PREFIX, name),
             package_name = name,
             version = pkg.version,
-            lock = pkg.lock,
+            lock = pkg.lock_file,
             path = pkg.path,
             code_assets = curated_code_assets(name, pkg.version),
             ignore_hook = name in ignore_hooks,
@@ -621,6 +660,7 @@ def _pub_impl(ctx):
         pub_lock_library(
             name = library_repo(_SPOKE_PREFIX, name),
             package_name = name,
+            index = index_label(_SPOKE_PREFIX),
             spoke_prefix = _SPOKE_PREFIX,
         )
 
@@ -684,11 +724,14 @@ def _pub_impl(ctx):
         pub_lock_hub(
             name = hub_name,
             packages = {name: library_label(name) for name in packages},
+            versions = {name: fetched[name] for name in packages if name in fetched},
+            sources = {name: source_label(_SPOKE_PREFIX, name) for name in packages if name in fetched},
         )
 
     # The repositories are fixed by the tags and the locks read above: a
     # hosted package without a sha256 or a git package without a commit id
-    # fails, so nothing depends on what a server holds on the day.
+    # fails, so nothing depends on what a server holds on the day. What a
+    # directory outside the repository holds is its repository's to watch.
     return ctx.extension_metadata(
         root_module_direct_deps = [name for name, dev in root_repos.items() if not dev],
         root_module_direct_dev_deps = [name for name, dev in root_repos.items() if dev],
