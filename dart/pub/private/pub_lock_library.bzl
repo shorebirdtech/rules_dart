@@ -8,20 +8,27 @@ dependency cycle (`pub_graph.bzl`):
 pub allows packages to depend on each other (`dio` and `dio_web_adapter`), and
 Bazel does not. A declared cycle (`pub.cycle()`, or rules_dart's curated
 ones) is one `pub_library` in the library repository of its first package by
-name, and every other package of it aliases that; an undeclared one fails,
-naming the declaration to write.
+name, and every other package of it aliases that; an undeclared one fails the
+build using the package, naming the declaration to write. So does a dependency
+nothing supplies, and a package refused when its source repository was made
+(`pub_refusal.bzl`): the repository still fetches, as `bazel fetch --all` and
+`bazel vendor` need of every repository, whether or not a build uses it.
 
 The source repositories read nothing of each other, so planning a cycle never
 asks a repository to wait on itself.
 """
 
-load("//dart/pub:pub_graph.bzl", "dependency_cycle", "dependency_graph", "read_pubspec_dependencies")
+load("//dart/pub:pub_graph.bzl", "cycle_error", "dependency_cycle", "dependency_graph", "read_pubspec_dependencies")
 load("//dart/pub/private:build_content.bzl", "make_pub_library_build_content")
+load("//dart/pub/private:pub_refusal.bzl", "failing_target", "read_pubspec_refusal")
 
 visibility("//dart/...")
 
 def source_repo(prefix, package):
     return "{}__{}".format(prefix, package)
+
+def files_repo(prefix, package):
+    return "{}_files__{}".format(prefix, package)
 
 def library_repo(prefix, package):
     return "{}_lib__{}".format(prefix, package)
@@ -30,6 +37,14 @@ def index_repo(prefix):
     return "{}_index".format(prefix)
 
 _INDEX = "index.json"
+
+def index_label(prefix):
+    """The index file, as an attribute of a repository the same extension makes names it."""
+    return "@{}//:{}".format(index_repo(prefix), _INDEX)
+
+def source_label(prefix, package):
+    """A file of a package's source repository, as its index names the repository."""
+    return "@{}//:BUILD.bazel".format(source_repo(prefix, package))
 
 def unsupplied_dependency_error(package, version, dep, why):
     """The error for a fetched package depending on a locked package nothing fetches.
@@ -62,10 +77,7 @@ def read_index(ctx):
     Returns:
       The index, as `pub_lock_index` wrote it.
     """
-
-    # Through the canonical name, as `read_pubspec_dependencies` reads.
-    prefix = ctx.name[:len(ctx.name) - len(ctx.original_name)]
-    return json.decode(ctx.read(Label("@@{}{}//:{}".format(prefix, index_repo(ctx.attr.spoke_prefix), _INDEX))))
+    return json.decode(ctx.read(ctx.attr.index))
 
 def dependency_label(prefix, dep, explicit):
     """The label of `dep`'s library.
@@ -83,6 +95,11 @@ def dependency_label(prefix, dep, explicit):
         return "@{dep}//:{dep}".format(dep = dep)
     return "@{repo}//:{dep}".format(repo = library_repo(prefix, dep), dep = dep)
 
+def _unbuildable(ctx, message):
+    """Makes the package's target fail the build using it with `message`."""
+    ctx.file("BUILD.bazel", failing_target(ctx.attr.package_name, message))
+    return ctx.repo_metadata(reproducible = True)
+
 def _pub_lock_library_impl(ctx):
     prefix = ctx.attr.spoke_prefix
     index = read_index(ctx)
@@ -96,20 +113,29 @@ def _pub_lock_library_impl(ctx):
     # cycle through one of those is refused, naming the fix. Any other mapped
     # package is a leaf.
     served = index["served"]
+    sources = {package: Label(source) for package, source in index["sources"].items()}
     graph = dependency_graph(
         ctx.attr.package_name,
-        lambda p: read_pubspec_dependencies(ctx, source_repo(prefix, p)),
+        lambda p: read_pubspec_dependencies(ctx, sources[p]),
         follow = fetched | served,
     )
 
-    cycle = dependency_cycle(
-        graph,
-        ctx.attr.package_name,
+    # A refused package stops every build reaching it, and no other.
+    for member in graph:
+        refusal = read_pubspec_refusal(ctx, sources[member])
+        if refusal:
+            return _unbuildable(ctx, refusal)
+
+    declarations = dict(
         declared = index["cycles"],
         advisory = index["advisory_cycles"],
         declare = "pub.cycle",
         served = served,
     )
+    error = cycle_error(graph, ctx.attr.package_name, **declarations)
+    if error:
+        return _unbuildable(ctx, error)
+    cycle = dependency_cycle(graph, ctx.attr.package_name, **declarations)
     if cycle.owner != ctx.attr.package_name:
         ctx.file("BUILD.bazel", make_pub_library_build_content(
             name = ctx.attr.package_name,
@@ -120,7 +146,7 @@ def _pub_lock_library_impl(ctx):
     for member in cycle.packages:
         for dep in graph[member]:
             if dep not in fetched and dep not in resolved:
-                fail(unsupplied_dependency_error(
+                return _unbuildable(ctx, unsupplied_dependency_error(
                     member,
                     fetched[member],
                     dep,
@@ -139,7 +165,8 @@ pub_lock_library = repository_rule(
     implementation = _pub_lock_library_impl,
     attrs = {
         "package_name": attr.string(mandatory = True, doc = "The package."),
-        "spoke_prefix": attr.string(mandatory = True, doc = "Prefix of the source, library and index repositories' names."),
+        "index": attr.label(mandatory = True, allow_single_file = True, doc = "What `pub_lock_index` wrote."),
+        "spoke_prefix": attr.string(mandatory = True, doc = "Prefix of the source and library repositories' names."),
     },
     doc = "Plans a pub package's library: its dependency cycle, built as one target where it is declared.",
 )
@@ -148,6 +175,9 @@ def _pub_lock_index_impl(ctx):
     ctx.file("BUILD.bazel", "")
     ctx.file(_INDEX, json.encode({
         "versions": ctx.attr.versions,
+        # Canonical labels: naming a repository does not fetch it, so a library
+        # repository reads only the source repositories it reaches.
+        "sources": {package: str(label) for package, label in ctx.attr.sources.items()},
         "explicit": ctx.attr.explicit_packages,
         "resolved": ctx.attr.resolved_packages,
         "unsupplied": ctx.attr.unsupplied,
@@ -164,7 +194,8 @@ def _pub_lock_index_impl(ctx):
 pub_lock_index = repository_rule(
     implementation = _pub_lock_index_impl,
     attrs = {
-        "versions": attr.string_dict(doc = "Every package with a source repository, with its version."),
+        "versions": attr.string_dict(doc = "Every fetched package, with its version."),
+        "sources": attr.string_keyed_label_dict(doc = "Every package with a source repository, with a file in it."),
         "explicit_packages": attr.string_list(doc = "Packages declared with `pub.package()`: a dependency on one is on its own repository."),
         "resolved_packages": attr.string_list(doc = "Packages `resolve` maps to a workspace target: a dependency on one is on its library repository, which passes the target on."),
         "unsupplied": attr.string_dict(doc = "Packages a lock lists that nothing fetches, each with how the lock lists it. Depending on one is an error."),

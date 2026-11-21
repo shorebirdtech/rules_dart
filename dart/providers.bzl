@@ -6,6 +6,7 @@ load(
     _DartDataAssetInfo = "DartDataAssetInfo",
     _DartLinkedCodeAssetInfo = "DartLinkedCodeAssetInfo",
     _DartPackageInfo = "DartPackageInfo",
+    _check_dsym = "check_dsym",
 )
 
 # The upstream `code_assets` link-mode vocabulary, verbatim (see
@@ -51,7 +52,41 @@ forwarded silently discards every dependency's values.""",
     },
 )
 
-DartPackageMetadataInfo = provider(
+def _package_metadata_init(
+        label,
+        package_name,
+        package_root,
+        language_version,
+        version = "",
+        code_assets = (),
+        data_assets = (),
+        unreplaced_hook = "",
+        link_hook = None,
+        link_hook_assets = (),
+        linked_code_assets = (),
+        license_file = None,
+        fetched_identity = None):
+    # `language_version` has no default, as for `DartPackageInfo`: an absent
+    # one compiles the package at the SDK's own, so omitting it and stating
+    # `""` are different intentions.
+    return {
+        "label": label,
+        "package_name": package_name,
+        "package_root": package_root,
+        "language_version": language_version,
+        "version": version,
+        "code_assets": tuple(code_assets),
+        "data_assets": tuple(data_assets),
+        "unreplaced_hook": unreplaced_hook,
+        "link_hook": link_hook,
+        "link_hook_assets": tuple(link_hook_assets),
+        "linked_code_assets": tuple(linked_code_assets),
+        "license_file": license_file,
+        "fetched_identity": fetched_identity,
+    }
+
+DartPackageMetadataInfo, _raw_package_metadata_info = provider(
+    init = _package_metadata_init,
     doc = """A Dart package's own facts, declared once: the Bazel stand-in for its \
 `pubspec.yaml`, made by `dart_package_metadata`.
 
@@ -72,7 +107,9 @@ require-only, and a target providing `DartInfo` would make \
 
 A codegen rule returns the declaration it was built for, or, when it names \
 none, one with only the package name (`label` `None`), so the library \
-collecting its output can check that both name the same package.""",
+collecting its output can check that both name the same package. Every field \
+but `label`, `package_name`, `package_root` and `language_version` may be \
+left out, and is then empty.""",
     fields = {
         "label": "Label or None: The `dart_package_metadata` target. `None` on the provider a codegen rule naming no declaration returns.",
         "package_name": "str: The Dart package name used in `package:` imports. Required.",
@@ -86,6 +123,7 @@ collecting its output can check that both name the same package.""",
         "link_hook_assets": "tuple[str]: The ids of the data assets `link_hook` promises to emit in every program.",
         "linked_code_assets": "tuple[DartLinkedCodeAssetInfo]: Native code the package links into each program.",
         "license_file": "File or None: The package's license text.",
+        "fetched_identity": "struct or None: What a fetcher fetched the package as, or `None` for a package built in the workspace. See `DartPackageInfo.fetched_identity`.",
     },
 )
 
@@ -145,6 +183,68 @@ DartCompileInfo = provider(
 )
 
 DartCodeAssetInfo = _DartCodeAssetInfo
+
+def _link_inputs_init(library, inputs = None, gone = False):
+    if type(library) != "File":
+        fail("DartLinkInputsInfo: `library` must be a File, got %s." % type(library))
+    if type(gone) != "bool":
+        fail("DartLinkInputsInfo: `gone` must be a bool, got %s." % type(gone))
+    if inputs != None and type(inputs) != "depset":
+        fail("DartLinkInputsInfo: `inputs` must be a depset of Files, got %s." % type(inputs))
+
+    # What the library was linked from is either known or gone.
+    if gone and inputs != None:
+        fail("DartLinkInputsInfo: states both `inputs` and `gone`. Pass `inputs` when the files exist, and `gone = True` when they do not.")
+    if not gone and inputs == None:
+        fail("DartLinkInputsInfo: states neither `inputs` nor `gone`. Pass `inputs`, or `gone = True` when what the library was linked from no longer exists.")
+    return {"library": library, "inputs": inputs, "gone": gone}
+
+DartLinkInputsInfo, _raw_link_inputs_info = provider(
+    init = _link_inputs_init,
+    doc = """What a dynamic library a rule produces was linked from, stated by \
+that rule.
+
+`dart_code_asset` finds this itself when its `file` is the target that linked \
+the library with a C++ toolchain. A rule returns this provider when that cannot \
+work: it copies or renames a library, and forwards the inputs of the original, \
+or it links with an action of its own. `dart_code_asset` prefers it to what it \
+would find, carries `inputs` as `DartCodeAssetInfo.link_inputs`, and fails if \
+`library` is not the library it binds.
+
+A rule whose action links and then deletes the objects, or that copies a \
+library whose objects are gone, passes `gone = True` and no `inputs`: \
+`DartCodeAssetInfo.link_inputs` stays `None` and `link_inputs_gone` is `True`.""",
+    fields = {
+        "library": "File: The library this describes, the one the target provides.",
+        "inputs": "depset[File] or None: What `library` was linked from: at least every object file and static archive of the link. Empty for a library linked from nothing Bazel knows. `None` when `gone` is `True`.",
+        "gone": "bool: That what `library` was linked from existed and no longer does, because the action that linked it deleted it. Then `inputs` is `None`; `dart_code_asset` carries it as `DartCodeAssetInfo.link_inputs_gone`.",
+    },
+)
+
+def _dsym_init(library, dsym):
+    if type(library) != "File":
+        fail("DartDsymInfo: `library` must be a File, got %s." % type(library))
+    if type(dsym) != "File":
+        fail("DartDsymInfo: `dsym` must be a File, got %s." % type(dsym))
+    _check_dsym("DartDsymInfo", dsym)
+    return {"library": library, "dsym": dsym}
+
+DartDsymInfo, _raw_dsym_info = provider(
+    init = _dsym_init,
+    doc = """The dSYM of a dynamic library a rule produces, stated by that rule.
+
+`dart_code_asset` finds a dSYM itself when the action that wrote its `file` \
+wrote the dSYM too. A rule returns this provider when that cannot work: it \
+copies, renames or strips a library and forwards the dSYM of the original, which \
+still describes it because those keep the library's UUID, or a separate action \
+makes the dSYM. `dart_code_asset` prefers it to what it would find, carries \
+`dsym` as `DartCodeAssetInfo.dsym`, and fails if `library` is not the library \
+it binds.""",
+    fields = {
+        "library": "File: The library this describes, the one the target provides.",
+        "dsym": "File: The library's `.dSYM` directory.",
+    },
+)
 
 DartRecordedUsesInfo = provider(
     doc = """The uses of `@RecordUse` definitions the compiler recorded while \
@@ -231,15 +331,15 @@ that SDK is registered as, so nothing about which SDK compiles is fixed in \
 rules_dart.
 
 A platform has one platform `.dill` per kind of runtime it runs on: the VM \
-has a product runtime, Flutter a debug, a profile and a release \
-one. `runtimes` names each, and a compile asks for one by its name.""",
+has a debug runtime (what `dart run` starts) and a product one, Flutter a \
+debug, a profile and a release one. `runtimes` names each, and a compile asks for one by its name.""",
     fields = {
         "target": "str: The front end's target name (`vm`, `flutter`).",
         "aot_runtime": "File: The `dartaotruntime` that runs the snapshots.",
         "kernel_worker": "File or None: `kernel_worker_aot.dart.snapshot`, which compiles modules. None for a platform that compiles whole programs only.",
         "frontend_server": "File: `frontend_server_aot.dart.snapshot`, which compiles an executable's entrypoint and whole programs.",
-        "runtimes": "dict[str, struct]: The kinds of runtime a kernel can be compiled for, by name (`product` for the VM), each made by `dart_kernel_runtime()`: the platform `.dill` a kernel for that runtime compiles against, in whose directory the front end finds the SDK; the environment declarations that runtime fixes, e.g. `dart.vm.product=true`; and the front-end flags a whole-program compile for it takes.",
-        "module_runtime": "str: The entry of `runtimes` that modules, and the entrypoints linked with them, compile for.",
+        "runtimes": "dict[str, struct]: The kinds of runtime a kernel can be compiled for, by name (`debug` and `product` for the VM), each made by `dart_kernel_runtime()`: the platform `.dill` a kernel for that runtime compiles against, in whose directory the front end finds the SDK; the environment declarations that runtime fixes, e.g. `dart.vm.product=true`; and the front-end flags a whole-program compile for it takes.",
+        "module_runtime": "str: The entry of `runtimes` a test compiles for, as `dart test` runs it: its modules and the entrypoint linked with them, and its whole program when it is compiled as one.",
         "libraries_spec": "File or None: The `libraries.json` that lists the `dart:` libraries `target` provides, which modules are split by. None for a platform that compiles whole programs only.",
         "libraries_target": "str: The entry in `libraries_spec` to read (its `include` entries are followed).",
         "tool_files": "depset[File]: What the tools read at run time beyond the files named above; the actions take nothing else of the SDK. Empty for the VM, whose front end reads only its snapshot, its runtime and the platform.",

@@ -40,6 +40,7 @@ Directory project(
             '"packageUri": "lib/", "languageVersion": "3.13"}'].join(', ')}]}',
     );
   File(p.join(dir.path, 'analysis_options.yaml')).writeAsStringSync(options);
+  File(p.join(dir.path, 'fetched_packages.txt')).writeAsStringSync('');
   return dir;
 }
 
@@ -179,6 +180,155 @@ int use(Holder h) => h.missing;
     );
   });
 
+  test('reports neither a doc import it cannot resolve nor the references '
+      'it might supply, and everything else', () async {
+    Directory app(String name, {String other = ''}) => project(
+      name,
+      {
+        'app/lib/app.dart':
+            "/// @docImport 'package:absent/absent.dart';\nlibrary;\n\n"
+            "part 'part.dart';\n\n/// See [Absent].\nclass A {}\n",
+        'app/lib/part.dart':
+            "part of 'app.dart';\n\n/// See [Absent].\nclass B {}\n",
+        if (other.isNotEmpty) 'app/lib/other.dart': other,
+      },
+      packages: ['app'],
+      options: 'linter:\n  rules:\n    - comment_references\n',
+    );
+    final clean = await analyze(app('clean'), []);
+    expect(clean.exitCode, 0, reason: clean.output);
+    expect(clean.stamped, isTrue);
+
+    final rest = await analyze(
+      app('rest', other: '/// See [Absent].\nclass C {}\n'),
+      [],
+    );
+    expect(rest.exitCode, 1);
+    expect(rest.output, contains(p.join('app', 'lib', 'other.dart')));
+    expect(rest.output, isNot(contains('app.dart:')));
+    expect(rest.output, contains('1 issue found.'));
+  });
+
+  test('reports a doc import of what it can see, and only the references an '
+      'unresolved one could not supply', () async {
+    final missing = project(
+      'missing',
+      {
+        'app/lib/app.dart':
+            "/// @docImport 'package:app/misspelt.dart';\n"
+            "/// @docImport 'dart:ui';\nlibrary;\n",
+      },
+      packages: ['app'],
+    );
+    File(p.join(missing.path, 'fetched_packages.txt'))
+        .writeAsStringSync('app\n');
+    final reported = await analyze(missing, []);
+    expect(reported.exitCode, isNonZero);
+    expect(
+      'uri_does_not_exist_in_doc_import'.allMatches(reported.output),
+      hasLength(1),
+    );
+    expect(reported.output, isNot(contains('dart:ui')));
+
+    final narrowed = await analyze(
+      project(
+        'narrowed',
+        {
+          'app/lib/app.dart':
+              "/// @docImport 'package:absent/a.dart' show Shown;\n"
+              "/// @docImport 'package:absent/b.dart' as b;\nlibrary;\n\n"
+              '/// See [Shown], [b.Prefixed], [Unrelated] and [Prefixed].\n'
+              'class A {}\n',
+        },
+        packages: ['app'],
+        options: 'linter:\n  rules:\n    - comment_references\n',
+      ),
+      [],
+    );
+    expect(narrowed.output, contains('2 issues found.'));
+  });
+
+  test('fails on an unresolved doc import when the fetched packages are not '
+      'listed', () async {
+    final dir = project(
+      'unlisted',
+      {
+        'app/lib/app.dart':
+            "/// @docImport 'package:app/misspelt.dart';\nlibrary;\n",
+      },
+      packages: ['app'],
+    );
+    File(p.join(dir.path, 'fetched_packages.txt')).deleteSync();
+    final result = await analyze(dir, []);
+    expect(result.exitCode, isNonZero);
+    expect(result.stamped, isFalse);
+    expect(result.output, contains('fetched_packages.txt'));
+  });
+
+  for (final (form, library, partOf) in const [
+    ('its name', 'library app.main;', 'part of app.main;'),
+    ('a package URI', 'library;', "part of 'package:app/app.dart';"),
+  ]) {
+    test('an unresolved doc import covers a part that gives its library by '
+        '$form', () async {
+      final result = await analyze(
+        project(
+          'named_${form.hashCode}',
+          {
+            'app/lib/app.dart':
+                "/// @docImport 'package:absent/absent.dart';\n$library\n\n"
+                "part 'part.dart';\n",
+            'app/lib/part.dart':
+                '$partOf\n\n/// See [Absent] and [_Private].\nclass B {}\n',
+          },
+          packages: ['app'],
+          options: 'linter:\n  rules:\n    - comment_references\n',
+        ),
+        [],
+      );
+      // Only `_Private`, which no import can bring in.
+      expect('comment_references'.allMatches(result.output), hasLength(1));
+      expect(result.output, contains('part.dart:3:23'));
+    });
+  }
+
+  test('a doc import that could supply anything supplies no private name, and '
+      'one that does not exist supplies nothing', () async {
+    const comments = 'linter:\n  rules:\n    - comment_references\n';
+    final private = await analyze(
+      project(
+        'private',
+        {
+          'app/lib/app.dart':
+              "/// @docImport 'package:absent/a.dart';\n"
+              "/// @docImport 'package:absent/b.dart' as b;\nlibrary;\n\n"
+              '/// See [Public], [_private] and [_Private.member].\n'
+              'class A {}\n',
+        },
+        packages: ['app'],
+        options: comments,
+      ),
+      [],
+    );
+    expect(private.output, contains('2 issues found.'));
+
+    // The doc import is reported, so nothing is left to explain [Absent].
+    final missing = project(
+      'in_view',
+      {
+        'app/lib/app.dart':
+            "/// @docImport 'package:app/misspelt.dart';\nlibrary;\n\n"
+            '/// See [Absent].\nclass A {}\n',
+      },
+      packages: ['app'],
+      options: comments,
+    );
+    File(p.join(missing.path, 'fetched_packages.txt'))
+        .writeAsStringSync('app\n');
+    final reported = await analyze(missing, []);
+    expect(reported.output, contains('2 issues found.'));
+  });
+
   test('refuses a subtype of a dependency\'s base class the analyzer lets '
       'through', () async {
     final summary = await dep();
@@ -229,30 +379,6 @@ int use(Holder h) {
     final result = await analyze(app, [summary]);
     expect(result.exitCode, isNot(0));
     expect(result.output, allOf(contains('crashed'), contains(flag)));
-  });
-
-  test('says which comment_references are false', () async {
-    final summary = await dep();
-    final app = project(
-      'app',
-      {
-        'app/lib/app.dart': '''
-/// @docImport 'package:dep/dep.dart';
-/// @docImport 'dart:async';
-library;
-
-/// See [Thing], [Completer] and [Nowhere].
-class A {}
-''',
-      },
-      packages: ['app'],
-      options: 'linter:\n  rules:\n    - comment_references\n',
-    );
-    final result = await analyze(app, [summary]);
-    expect(result.exitCode, isNot(0));
-    expect(result.output, contains("'Thing' comes from the doc import of"));
-    expect(result.output, contains("'Completer' comes from the doc import of"));
-    expect(result.output, isNot(contains("'Nowhere' comes from")));
   });
 
   test('refuses a package split across targets under '

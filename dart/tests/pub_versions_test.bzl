@@ -1,7 +1,7 @@
 """Unit tests for `select_pub_version`, the one policy for a hosted package's version."""
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
-load("//dart/pub:pub_versions.bzl", "pub_version_request", "select_pub_version")
+load("//dart/pub:pub_versions.bzl", "is_semver", "normalize_hosted_url", "pub_version_request", "select_pub_version", "version_constraint_allows", "version_constraint_error")
 
 # buildifier: disable=bzl-visibility
 load("//dart/pub/private:pub_settings.bzl", "root_only_settings")
@@ -121,6 +121,64 @@ def _registry_conflict_is_an_error_test_impl(ctx):
     _contains(env, s.error, "different registries", "https://other, from b")
     return unittest.end(env)
 
+def _registry_spellings_agree_test_impl(ctx):
+    env = unittest.begin(ctx)
+
+    # pub reads each of these as pub.dev, as an older lock names it.
+    for url in ["https://pub.dartlang.org", "https://pub.dartlang.org/", "https://pub.dev/", "HTTPS://Pub.Dev:443"]:
+        s = select_pub_version("p", [_req("1.0.0", where = "a"), _req("2.0.0", where = "b", url = url)])
+        asserts.equals(env, None, s.error, url)
+        asserts.equals(env, "https://pub.dev", s.request.url, url)
+    s = select_pub_version("p", [_req("1.0.0", url = "https://example.com/api"), _req("1.0.0", url = "https://example.com:443/x/../api/")])
+    asserts.equals(env, None, s.error)
+
+    # Not pub.dev: another scheme, or a path on it.
+    for url in ["http://pub.dev", "https://pub.dev/api"]:
+        s = select_pub_version("p", [_req("1.0.0"), _req("1.0.0", url = url)])
+        _contains(env, s.error, "different registries")
+    return unittest.end(env)
+
+def _winner_carries_its_registry_test_impl(ctx):
+    env = unittest.begin(ctx)
+    s = select_pub_version("p", [_req("2.0.0", url = "https://private.example.com", sha256 = "two")])
+    asserts.equals(env, ("2.0.0", "two", "https://private.example.com"), (s.request.version, s.request.sha256, s.request.url))
+    return unittest.end(env)
+
+# What pub's `validateAndNormalizeHostedUrl` gives for each, run with Dart's
+# `Uri`; a URL pub refuses comes back as written.
+_NORMALIZED = {
+    "https://pub.dev": "https://pub.dev",
+    "https://pub.dev/": "https://pub.dev",
+    "https://pub.dartlang.org": "https://pub.dev",
+    "https://pub.dartlang.org/": "https://pub.dev",
+    "HTTPS://Pub.Dev": "https://pub.dev",
+    "https://pub.dev:443": "https://pub.dev",
+    "http://pub.dev": "http://pub.dev",
+    "http://example.com:80/": "http://example.com",
+    "https://example.com:8443/": "https://example.com:8443",
+    "https://example.com:08443": "https://example.com:8443",
+    "https://example.com/api": "https://example.com/api/",
+    "https://example.com/api/": "https://example.com/api/",
+    "https://example.com/a/./b/../c": "https://example.com/a/c/",
+    "https://example.com/a/..": "https://example.com",
+    "https://example.com//a": "https://example.com//a/",
+    "https://example.com/%7euser/%2fx": "https://example.com/~user/%2Fx/",
+    "https://[::1]:443/x": "https://[::1]/x/",
+    "https://pub.dartlang.org/api": "https://pub.dartlang.org/api/",
+    "https://example.com:443/../a": "https://example.com/a/",
+    "file:///tmp/registry": "file:///tmp/registry",
+    "https://user@example.com": "https://user@example.com",
+    "https://example.com/?q": "https://example.com/?q",
+    "https://example.com#f": "https://example.com#f",
+    "ftp://example.com": "ftp://example.com",
+}
+
+def _normalize_hosted_url_test_impl(ctx):
+    env = unittest.begin(ctx)
+    for url, want in _NORMALIZED.items():
+        asserts.equals(env, want, normalize_hosted_url(url), url)
+    return unittest.end(env)
+
 def _prerelease_orders_below_release_test_impl(ctx):
     env = unittest.begin(ctx)
     s = select_pub_version("p", [_req("2.0.0-dev.1"), _req("2.0.0"), _req("1.99.0")])
@@ -197,8 +255,60 @@ _settings_tag_is_named_test = unittest.make(_settings_tag_is_named_test_impl)
 _digest_conflict_is_an_error_test = unittest.make(_digest_conflict_is_an_error_test_impl)
 _digest_conflict_at_a_losing_version_is_an_error_test = unittest.make(_digest_conflict_at_a_losing_version_is_an_error_test_impl)
 _registry_conflict_is_an_error_test = unittest.make(_registry_conflict_is_an_error_test_impl)
+_registry_spellings_agree_test = unittest.make(_registry_spellings_agree_test_impl)
+_winner_carries_its_registry_test = unittest.make(_winner_carries_its_registry_test_impl)
+_normalize_hosted_url_test = unittest.make(_normalize_hosted_url_test_impl)
 _prerelease_orders_below_release_test = unittest.make(_prerelease_orders_below_release_test_impl)
 _higher_build_raises_root_test = unittest.make(_higher_build_raises_root_test_impl)
+
+def _constraint_allows_as_pub_does_test_impl(ctx):
+    # A sample of what `pub_semver_conformance` checks against pub_semver.
+    env = unittest.begin(ctx)
+    for constraint, version, allowed in [
+        # A pre-release sorts below its release, so it misses that floor.
+        (">=3.50.1", "3.50.1-0.0.pre-12", False),
+        (">=3.50.1-0", "3.50.1-0.0.pre-12", True),
+        (">=3.50.1", "3.50.1", True),
+        # No space is needed between terms.
+        (">=2.11.0<3.0.0", "2.10.0", False),
+        (">=2.11.0<3.0.0", "2.11.0", True),
+        (">=2.11.0<3.0.0", "3.0.0", False),
+        # A max bound leaves out its own pre-releases...
+        ("<2.0.0", "2.0.0-dev", False),
+        (">=1.0.0 <2.0.0", "2.0.0-dev", False),
+        # ...unless the range starts among them or the bound is one or has a build.
+        (">=2.0.0-dev <2.0.0", "2.0.0-rc", True),
+        ("<2.0.0-rc", "2.0.0-dev", True),
+        ("<2.0.0+1", "2.0.0-dev", True),
+        # Builds are ordered, and an exact version takes only itself.
+        (">1.0.0", "1.0.0+1", True),
+        ("1.0.0", "1.0.0+1", False),
+        # `^` keeps the left-most non-zero of major and minor.
+        ("^1.2.3", "1.9.0", True),
+        ("^1.2.3", "2.0.0-0", False),
+        ("^0.2.3", "0.2.9", True),
+        ("^0.2.3", "0.3.0", False),
+        ("^0.0.3", "0.0.9", True),
+        ("any", "0.0.0-0", True),
+        # A range with nothing in it.
+        (">=2.0.0 <1.0.0", "1.5.0", False),
+    ]:
+        asserts.equals(env, allowed, version_constraint_allows(constraint, version), "%s allows %s" % (constraint, version))
+    return unittest.end(env)
+
+_constraint_allows_as_pub_does_test = unittest.make(_constraint_allows_as_pub_does_test_impl)
+
+def _constraint_and_version_errors_test_impl(ctx):
+    env = unittest.begin(ctx)
+    asserts.equals(env, None, version_constraint_error(">=1.0.0<2.0.0"))
+    asserts.equals(env, "cannot parse an empty string", version_constraint_error(" "))
+    asserts.equals(env, "cannot include other constraints with \"^\"", version_constraint_error("^1.0.0 || ^2.0.0"))
+    asserts.true(env, is_semver("3.50.1-0.0.pre-12"))
+    asserts.false(env, is_semver("3.50"))
+    asserts.false(env, is_semver("9223372036854775808.0.0"), "pub_semver reads an int64")
+    return unittest.end(env)
+
+_constraint_and_version_errors_test = unittest.make(_constraint_and_version_errors_test_impl)
 
 def pub_versions_test_suite(name):
     small_unittest_suite(
@@ -214,6 +324,9 @@ def pub_versions_test_suite(name):
         _digest_conflict_is_an_error_test,
         _digest_conflict_at_a_losing_version_is_an_error_test,
         _registry_conflict_is_an_error_test,
+        _registry_spellings_agree_test,
+        _winner_carries_its_registry_test,
+        _normalize_hosted_url_test,
         _prerelease_orders_below_release_test,
         _higher_build_raises_root_test,
         _settings_default_to_warning_test,
@@ -221,4 +334,6 @@ def pub_versions_test_suite(name):
         _dependency_settings_fail_test,
         _two_root_settings_fail_test,
         _dependency_ignore_hooks_fail_test,
+        _constraint_allows_as_pub_does_test,
+        _constraint_and_version_errors_test,
     )

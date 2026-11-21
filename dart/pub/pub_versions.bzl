@@ -1,5 +1,12 @@
-"""The one policy for which version of a hosted pub package a build uses.
+"""Pub versions for rule sets: comparing them with constraints, and choosing one.
 
+`version_constraint_allows` answers what pub_semver's `allows` answers, in plain
+Starlark, so a module extension can ask it as well as a repository rule or a
+rule; `version_constraint_error` says why pub would refuse a constraint and
+`is_semver` whether pub reads a version. A test compares them with
+`package:pub_semver` over thousands of cases.
+
+The rest is the one policy for which version of a hosted pub package a build uses.
 Every statement of a package's version is a request: a `pub.package()` in any
 module, and each lock that lists the package as hosted. The highest request
 wins, as Bazel's minimal version selection picks the highest version any
@@ -13,9 +20,15 @@ test can check them, and so rules_flutter's pub extension applies the same
 policy with its own commands.
 """
 
-load("//dart/pub/private:version.bzl", "parse_semver")
+load("//dart/pub/private:hosted_url.bzl", _normalize_hosted_url = "normalize_hosted_url")
+load("//dart/pub/private:version.bzl", "constraint_allows", "constraint_error", "parse_semver", _is_semver = "is_semver")
 
 CHECK_LEVELS = ["off", "warning", "error"]
+
+is_semver = _is_semver
+normalize_hosted_url = _normalize_hosted_url
+version_constraint_error = constraint_error
+version_constraint_allows = constraint_allows
 
 def pub_version_request(version, sha256, url, is_root, where, upgrade = "", refresh = ""):
     """One statement of a hosted package's version, for `select_pub_version`.
@@ -23,7 +36,9 @@ def pub_version_request(version, sha256, url, is_root, where, upgrade = "", refr
     Args:
         version: The version it asks for.
         sha256: The digest it pins for that version's archive.
-        url: The registry it fetches from (`https://pub.dev` for pub.dev).
+        url: The registry it fetches from (`https://pub.dev` for pub.dev),
+            as the statement gives it. The request holds it as pub spells it
+            (`normalize_hosted_url`), so two spellings of one registry agree.
         is_root: Whether the root module states it.
         where: How a message names the statement, as a phrase:
             "`pub.package()` in module `dep`", "the lock `//app:pubspec.lock`".
@@ -39,7 +54,7 @@ def pub_version_request(version, sha256, url, is_root, where, upgrade = "", refr
     return struct(
         version = version,
         sha256 = sha256,
-        url = url,
+        url = _normalize_hosted_url(url),
         is_root = is_root,
         where = where,
         upgrade = upgrade,
@@ -67,7 +82,8 @@ def select_pub_version(name, requests, check_direct_dependencies = "warning", se
 
     Returns:
         `struct(request, warning, error)`: the winning request (None when
-        `error` is set), and the messages, each None when there is none.
+        `error` is set), whose version, digest and registry are the build's,
+        and the messages, each None when there is none.
         `error` is set when two requests disagree on the registry or on a
         version's digest, or when a root request is raised and the level is
         `error`; `warning`, when one is raised and the level is `warning`.

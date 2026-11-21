@@ -1,0 +1,53 @@
+"""Why a package cannot be built, recorded so that only the builds reaching it fail.
+
+A pubspec pub refuses, a `path` package's directory that is not there, or one
+with a Bazel build of its own. A lock is fetched whole by `bazel fetch --all` and `bazel vendor`, packages no
+build uses among them, so a source repository records the refusal instead of
+failing, and every library repository reaching the package fails its build with
+it.
+"""
+
+visibility("//dart/pub/...")
+
+PUBSPEC_REFUSAL = "pubspec_refusal.txt"
+
+def write_pubspec_refusal(ctx, refusal):
+    """Records in a source repository why its package cannot be built.
+
+    Args:
+      ctx: The source repository's `repository_ctx`.
+      refusal: The message, such as `read_pubspec`'s `error`, or None.
+    """
+    ctx.file(PUBSPEC_REFUSAL, refusal or "")
+
+def read_pubspec_refusal(ctx, source):
+    """Reads what `write_pubspec_refusal` recorded in another repository.
+
+    Args:
+      ctx: The reading repository's `repository_ctx`.
+      source: A `Label` in the root package of the source repository.
+
+    Returns:
+      The message, or None.
+    """
+    return ctx.read(source.same_package_label(PUBSPEC_REFUSAL)) or None
+
+def failing_target(name, message):
+    """A target that fails the build using it with `message`, as a whole BUILD file.
+
+    Args:
+      name: The target's name.
+      message: What is wrong.
+
+    Returns:
+      The file's text.
+    """
+    return """\
+load("@rules_dart//dart/private:sdk_error.bzl", "dart_sdk_error")
+
+dart_sdk_error(
+    name = "{name}",
+    message = {message},
+    visibility = ["//visibility:public"],
+)
+""".format(name = name, message = json.encode(message))

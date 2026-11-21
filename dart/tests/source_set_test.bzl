@@ -10,8 +10,8 @@ load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
 load("//dart:providers.bzl", "DartInfo", "DartPackageInfo")
 load("//dart/private:common.bzl", "collect_packages", "collect_transitive_srcs", "package_code_assets")
 load("//dart/private:dart_info.bzl", "derived_package_info", "package_lib_prefix")
-load("//dart/private:package_info.bzl", "raw_dart_package_info")
-load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "colocate_packages", "needs_source_assembly", "package_for", "package_record_for", "package_record_for_index", "package_record_index")
+load("//dart/private:package_info.bzl", "purl_identity", "raw_dart_package_info")
+load("//dart/private:source_set.bzl", "COPY_TO_DIRECTORY_TOOLCHAINS", "colocate_packages", "needs_source_assembly", "package_for", "package_record_for", "package_record_for_index", "package_record_index", "package_source_roots")
 
 def _fake_file(is_source):
     # needs_source_assembly only inspects File.is_source.
@@ -97,6 +97,22 @@ def _package_for_external_and_nomatch_test_impl(ctx):
     pkgs = [_fake_pkg("foo", "../pub/foo")]
     asserts.equals(env, "foo", package_for("../pub/foo/lib/x.dart", pkgs))
     asserts.equals(env, None, package_for("other/lib/x.dart", pkgs))
+    return unittest.end(env)
+
+def _source_roots_test_impl(ctx):
+    env = unittest.begin(ctx)
+    local = package_source_roots("pkg/a")
+    asserts.equals(env, ["pkg/a"], local.root_paths)
+    asserts.equals(env, [], local.external_repositories)
+    root = package_source_roots("")
+    asserts.equals(env, ["."], root.root_paths)
+    asserts.equals(env, [], root.external_repositories)
+    external = package_source_roots("../dep/pkg/a")
+    asserts.equals(env, ["pkg/a"], external.root_paths)
+    asserts.equals(env, ["dep"], external.external_repositories)
+    external_root = package_source_roots("../dep")
+    asserts.equals(env, [], external_root.root_paths)
+    asserts.equals(env, ["dep"], external_root.external_repositories)
     return unittest.end(env)
 
 def _scan_oracle(short_path, packages):
@@ -221,6 +237,7 @@ def _record(package_root, language_version, code_assets, unreplaced_hook):
         linked_code_assets = (),
         license_file = None,
         metadata = None,
+        fetched_identity = purl_identity("pkg:pub/pkg@1.0.0"),
     )
 
 def _fake_asset(asset_id):
@@ -240,6 +257,7 @@ def _derive_carries_every_field_test_impl(ctx):
     asserts.equals(env, "2.12", out.language_version)
     asserts.equals(env, ["package:pkg/a.g.dart"], [a.asset_id for a in out.code_assets])
     asserts.equals(env, "hook/build.dart", out.unreplaced_hook)
+    asserts.equals(env, purl_identity("pkg:pub/pkg@1.0.0"), out.fetched_identity)
     return unittest.end(env)
 
 def _derive_overrides_only_named_test_impl(ctx):
@@ -312,6 +330,7 @@ _longest_prefix_test = unittest.make(_package_for_longest_prefix_test_impl)
 _exact_dir_test = unittest.make(_package_for_exact_dir_test_impl)
 _non_root_lib_only_test = unittest.make(_package_for_non_root_only_claims_lib_test_impl)
 _external_nomatch_test = unittest.make(_package_for_external_and_nomatch_test_impl)
+_source_roots_test = unittest.make(_source_roots_test_impl)
 _index_nested_test = unittest.make(_index_nested_roots_test_impl)
 _index_split_test = unittest.make(_index_split_roots_test_impl)
 _index_outside_test = unittest.make(_index_outside_packages_test_impl)
@@ -332,6 +351,7 @@ def source_set_test_suite(name):
     _exact_dir_test(name = "source_set_package_for_exact_dir_test", size = "small")
     _non_root_lib_only_test(name = "source_set_package_for_non_root_lib_only_test", size = "small")
     _external_nomatch_test(name = "source_set_package_for_external_test", size = "small")
+    _source_roots_test(name = "source_set_source_roots_test", size = "small")
     _index_nested_test(name = "source_set_index_nested_test", size = "small")
     _index_split_test(name = "source_set_index_split_test", size = "small")
     _index_outside_test(name = "source_set_index_outside_test", size = "small")
@@ -350,6 +370,7 @@ def source_set_test_suite(name):
             ":source_set_package_for_exact_dir_test",
             ":source_set_package_for_non_root_lib_only_test",
             ":source_set_package_for_external_test",
+            ":source_set_source_roots_test",
             ":source_set_index_nested_test",
             ":source_set_index_split_test",
             ":source_set_index_outside_test",
